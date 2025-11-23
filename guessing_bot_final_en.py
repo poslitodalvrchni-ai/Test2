@@ -27,9 +27,9 @@ def run_flask_app():
 		print(f"Error starting Flask server: {e}", file=sys.stderr)
 
 # --- BOT CONFIGURATION AND CONSTANTS ---
-TOKEN = os.getenv('DISCORD_TOKEN')
+# TOKEN is read via os.getenv('DISCORD_TOKEN') below
 
-# Centralized Configuration Dictionary
+# Centralized Configuration Dictionary - MAKE SURE TO UPDATE THESE IDs
 CONFIG = {
 	# File Persistence
 	'DATA_FILE': 'user_wins.json',
@@ -41,13 +41,13 @@ CONFIG = {
 	# Default hint time is 60 minutes (1 hour)
 	'DEFAULT_HINT_TIMING_MINUTES': 60, # Initial value, modified by !sethinttiming
 
-	# Channel and Category IDs
+	# Channel and Category IDs (***UPDATE THESE PLACEHOLDERS***)
 	'TARGET_CATEGORY_ID': 1441691009993146490, # Main game category ID
 	'WINS_CHANNEL_ID': 1442057049805422693, 	# Channel for !wins command only
 	'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, # Channel for announcing the winner
 	'HINT_CHANNEL_ID': 1441386236844572834, 	# Channel for periodic hint announcements
 	
-	# Role IDs
+	# Role IDs (***UPDATE THESE PLACEHOLDERS***)
 	'ADMIN_ROLE_IDS': [
 		1397641683205624009, 
 		1441386642332979200
@@ -57,7 +57,7 @@ CONFIG = {
 	],
 	'GAME_END_PING_ROLE_ID': 1442080784570646629, # Role to ping when the game ends (e.g., for admins)
 
-	# Winner Roles (Key: minimum wins required, Value: Role ID)
+	# Winner Roles (Key: minimum wins required, Value: Role ID) (***UPDATE THESE PLACEHOLDERS***)
 	'WINNER_ROLES_CONFIG': {
 		1: 	 1441693698776764486,
 		5: 	 1441693984266129469,
@@ -842,6 +842,9 @@ if __name__ == '__main__':
 	t = threading.Thread(target=run_flask_app, daemon=True)
 	t.start()
 	
+	# Read the token from the environment variable
+	TOKEN = os.getenv('DISCORD_TOKEN')
+
 	# Run the Discord Bot
 	if TOKEN:
 		try:
