@@ -37,13 +37,14 @@ CONFIG = {
     # Game Parameters
     'REQUIRED_HINTS': 7,
     'GUESS_COOLDOWN_MINUTES': 60,
-    'DEFAULT_HINT_TIMING_MINUTES': 5, # Initial value, modified by !sethinttiming
+    # Default hint time is 60 minutes (1 hour)
+    'DEFAULT_HINT_TIMING_MINUTES': 60, # Initial value, modified by !sethinttiming
 
     # Channel and Category IDs
     'TARGET_CATEGORY_ID': 1441691009993146490, # Main game category ID
-    'WINS_CHANNEL_ID': 1442057049805422693,    # Channel for !wins command only
+    'WINS_CHANNEL_ID': 1442057049805422693,     # Channel for !wins command only
     'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, # Channel for announcing the winner
-    'HINT_CHANNEL_ID': 1441386236844572834,    # Channel for periodic hint announcements
+    'HINT_CHANNEL_ID': 1441386236844572834,     # Channel for periodic hint announcements
     
     # Role IDs
     'ADMIN_ROLE_IDS': [
@@ -57,12 +58,12 @@ CONFIG = {
 
     # Winner Roles (Key: minimum wins required, Value: Role ID)
     'WINNER_ROLES_CONFIG': {
-        1:    1441693698776764486,
-        5:    1441693984266129469,
-        10:   1441694043477381150,
-        25:   1441694109268967505,
-        50:   1441694179011989534,
-        100:  1441694438345674855
+        1:     1441693698776764486,
+        5:     1441693984266129469,
+        10:    1441694043477381150,
+        25:    1441694109268967505,
+        50:    1441694179011989534,
+        100:   1441694438345674855
     }
 }
 
@@ -71,14 +72,15 @@ correct_answer = None
 current_hints_storage = {}
 current_hints_revealed = []
 is_game_active = False
-hint_timing_minutes = CONFIG['DEFAULT_HINT_TIMING_MINUTES'] # Can be changed via command
+# Initialize using the updated CONFIG value (60 minutes)
+hint_timing_minutes = CONFIG['DEFAULT_HINT_TIMING_MINUTES'] 
 last_hint_reveal_time = None
 user_wins = {}
 
 # Set up Intents
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True 
+intents.members = True # Required for reliable role management and leaderboard
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Utility Functions ---
@@ -174,34 +176,41 @@ async def hint_timer():
     now = datetime.now()
     next_reveal_time = last_hint_reveal_time + timedelta(minutes=hint_timing_minutes)
     
-    if now >= next_reveal_time:
-        next_hint_number = len(current_hints_revealed) + 1
-        REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
-        
-        if next_hint_number in current_hints_storage:
-            # USE THE DEDICATED CHANNEL FOR AUTOMATIC HINTS
-            channel = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
+    try:
+        if now >= next_reveal_time:
+            next_hint_number = len(current_hints_revealed) + 1
+            REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
             
-            if channel:
-                hint_text = current_hints_storage[next_hint_number]
+            if next_hint_number in current_hints_storage:
+                # USE THE DEDICATED CHANNEL FOR AUTOMATIC HINTS
+                channel = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
                 
-                # Create the ping string for all defined roles
-                ping_string = "".join([f"<@&{role_id}> " for role_id in CONFIG['HINT_PING_ROLE_IDS']])
-                
-                # Construct the message including the role pings
-                ping_message = f"{ping_string}📢 **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
+                if channel:
+                    hint_text = current_hints_storage[next_hint_number]
+                    
+                    # Create the ping string for all defined roles
+                    ping_string = "".join([f"<@&{role_id}> " for role_id in CONFIG['HINT_PING_ROLE_IDS']])
+                    
+                    # Construct the message including the role pings
+                    ping_message = f"{ping_string}📢 **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
 
-                await channel.send(ping_message)
-                
-                # Store the revealed hint
-                current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text}) 
-                last_hint_reveal_time = now
-        
-        else:
-            # All hints revealed, stop the timer
-            if hint_timer.is_running():
-                hint_timer.stop()
-                
+                    await channel.send(ping_message)
+                    
+                    # Store the revealed hint and reset the timer
+                    current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text}) 
+                    last_hint_reveal_time = now
+                else:
+                    print(f"Warning: Hint channel ID {CONFIG['HINT_CHANNEL_ID']} not found.")
+            
+            else:
+                # All hints revealed, stop the timer
+                if hint_timer.is_running():
+                    hint_timer.stop()
+                    
+    except Exception as e:
+        # Log the error but allow the loop to continue next minute
+        print(f"ERROR in hint_timer task: {e}")
+
 # --- Bot Events ---
 @bot.event
 async def on_ready():
@@ -318,6 +327,7 @@ async def set_hint_timing(ctx, minutes: int):
         await ctx.send("Cannot change timing while a game is running.")
         return
 
+    # Maximum 60 minutes allowed for manual change
     if minutes < 1 or minutes > 60:
         await ctx.send("Interval must be between 1 and 60 minutes.")
         return
@@ -472,6 +482,7 @@ async def show_leaderboard(ctx):
         await ctx.send(f"No one has won yet! Be the first to guess. (Your wins: 0)")
         return
 
+    # Sort the wins data by count, descending
     sorted_winners = sorted(user_wins.items(), key=lambda item: item[1], reverse=True)
     
     leaderboard_embed = discord.Embed(
@@ -483,7 +494,7 @@ async def show_leaderboard(ctx):
     rank = 1
     for user_id, wins in sorted_winners[:10]:
         member = ctx.guild.get_member(user_id)
-        # Fallback in case the member object is not found
+        # Fallback in case the member object is not found (due to cache/leaving guild)
         member_name = member.display_name if member else f"Unknown User ({user_id})"
         
         leaderboard_embed.add_field(
