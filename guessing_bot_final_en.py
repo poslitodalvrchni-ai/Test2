@@ -52,8 +52,9 @@ CONFIG = {
 		1397641683205624009, 
 		1441386642332979200
 	],
+	# OPRAVENO: Nastaveno ID pro pingování nápověd na 1442182783253483650
 	'HINT_PING_ROLE_IDS': [
-		1441388270201077882 # Role to ping on every new hint
+		1442182783253483650 # Role to ping on every new hint (The requested ID)
 	],
 	# FIX: This line was causing a SyntaxError. We use only one ID now.
 	'GAME_END_PING_ROLE_ID': 1441386642332979200, 
