@@ -37,7 +37,7 @@ CONFIG = {
 	
 	# Game Parameters
 	'REQUIRED_HINTS': 7,
-	'GUESS_COOLDOWN_MINUTES': 60,
+	'GUESS_COOLDOWN_MINUTES': 30,
 	# Default hint time is 60 minutes (1 hour)
 	'DEFAULT_HINT_TIMING_MINUTES': 60, # Initial value, modified by !sethinttiming
 
