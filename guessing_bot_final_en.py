@@ -5,21 +5,24 @@ import json
 from datetime import datetime, timedelta
 import threading
 import sys
-from flask import Flask
+from flask import Flask # Import Flask for the keep-alive server
 
-# --- FLASK (WEB SERVICE) SETUP ---
+# --- FLASK (WEB SERVICE / KEEP-ALIVE) SETUP ---
 # Initializes the Flask app
 app = Flask(__name__)
+# Get the port from environment variables (Render sets this)
 WEB_PORT = os.getenv('PORT', 8080) 
 
 @app.route('/')
 def home():
     """Simple Health Check endpoint required by Render for Web Services."""
-    return "Item Guessing Bot Worker is Running!", 200
+    # Změněno na češtinu pro lepší kontext při kontrole
+    return "Item Guessing Bot Worker is Running! (Keep-Alive Active)", 200
 
 def run_flask_app():
-    """Starts Flask on a separate thread to listen for web requests."""
+    """Starts Flask on a separate thread to listen for web requests (Keep-Alive)."""
     try:
+        # Use 0.0.0.0 to listen on all interfaces
         app.run(host='0.0.0.0', port=WEB_PORT, debug=False)
     except Exception as e:
         print(f"Error starting Flask server: {e}", file=sys.stderr)
@@ -29,10 +32,13 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 DATA_FILE = 'user_wins.json'
 
 # --- Custom Restriction IDs ---
-TARGET_CATEGORY_ID = 1441691009993146490
+# ID hlavní herní kategorie
+TARGET_CATEGORY_ID = 1441691009993146490 
+# ID kanálu pro žebříček, kde funguje jen !wins
+WINS_CHANNEL_ID = 1442057049805422693 
 ADMIN_ROLE_IDS = [
-    1397641683205624009,  # První ID role
-    1441386642332979200   # Druhé ID role
+    1397641683205624009, 
+    1441386642332979200
 ]
 
 # Set up Intents
@@ -48,6 +54,7 @@ current_hints_revealed = []
 is_game_active = False
 hint_timing_minutes = 5
 last_hint_reveal_time = None
+REQUIRED_HINTS = 7 # Změněno z 5 na 7
 
 # --- Role Configuration (Your Reward IDs) ---
 WINNER_ROLES_CONFIG = {
@@ -66,12 +73,10 @@ def is_authorized_admin():
     """Custom check to ensure the user has one of the specific admin roles."""
     async def predicate(ctx):
         if not ctx.guild:
-            # Admin commands should not work in DMs
             return False 
         
         member_roles = [role.id for role in ctx.author.roles]
         
-        # Check if the member has any of the required admin roles
         for required_id in ADMIN_ROLE_IDS:
             if required_id in member_roles:
                 return True
@@ -79,24 +84,32 @@ def is_authorized_admin():
         return False
     return commands.check(predicate)
 
-# --- Global Category Check ---
+# --- Global Command Location Check ---
 
 @bot.check
-async def category_check(ctx):
-    """Global check to restrict all bot commands to the TARGET_CATEGORY_ID."""
-    # Allow commands from DMs (although !start, !guess, etc. won't fully function without a guild)
+async def command_location_check(ctx):
+    """Global check to restrict commands based on context."""
     if ctx.guild is None:
-        return True
-        
+        return True # Povolit DMs
+
+    # Check 1: Command je v hlavní herní kategorii (Většina příkazů funguje zde)
     if ctx.channel.category_id == TARGET_CATEGORY_ID:
         return True
+
+    # Check 2: Command je ve speciálním kanálu pro žebříček (!wins povolen, ostatní blokovány)
+    if ctx.channel.id == WINS_CHANNEL_ID:
+        if ctx.command.name in ['wins', 'lbc', 'top']:
+            return True # !wins je povolen
+        else:
+            # Blokovat všechny ostatní příkazy (!guess, !start, atd.)
+            await ctx.send("Tento kanál je určen pouze pro žebříček (`!wins`). Hádání a ovládání probíhá v herní kategorii.", delete_after=10)
+            return False
     
-    # Optionally send a message to the user/channel if the command is used outside the designated category
-    # await ctx.send("This bot's commands can only be used in the designated category.", delete_after=5)
+    # Check 3: Příkaz je v jakémkoli jiném kanálu nebo kategorii
+    await ctx.send(f"❌ Tento příkaz lze použít pouze v herní kategorii.", delete_after=10)
     return False
 
 # --- Data Persistence Functions ---
-# (load_user_wins and save_user_wins remain unchanged)
 def load_user_wins():
     global user_wins
     if os.path.exists(DATA_FILE):
@@ -121,7 +134,6 @@ def save_user_wins():
 
 
 # --- Timed Hint Task ---
-# (hint_timer remains unchanged)
 @tasks.loop(minutes=1)
 async def hint_timer():
     global current_hints_revealed, last_hint_reveal_time, current_hints_storage, hint_timing_minutes
@@ -136,21 +148,22 @@ async def hint_timer():
         next_hint_number = len(current_hints_revealed) + 1
         
         if next_hint_number in current_hints_storage:
+            # We get the channel ID from the first revealed hint in the list
             channel = bot.get_channel(current_hints_revealed[0]['channel_id'])
             
             if channel:
                 hint_text = current_hints_storage[next_hint_number]
-                await channel.send(f"⏳ **New Hint ({next_hint_number}/{len(current_hints_storage)}):** {hint_text}")
+                await channel.send(f"⏳ **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}")
                 
                 current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text, 'channel_id': channel.id})
                 last_hint_reveal_time = now
         
         else:
+            # All hints revealed, stop the timer
             if hint_timer.is_running():
                 hint_timer.stop()
                 
 # --- Bot Events ---
-# (on_ready remains unchanged)
 @bot.event
 async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
@@ -160,7 +173,6 @@ async def on_ready():
         hint_timer.start()
 
 # --- Utility Functions ---
-# (award_winner_roles remains unchanged)
 async def award_winner_roles(member: discord.Member):
     global user_wins
 
@@ -198,7 +210,7 @@ async def award_winner_roles(member: discord.Member):
         try:
             if target_role not in member.roles:
                 await member.add_roles(target_role)
-                await member.send(f"You're amazing! You've reached {wins_count} wins and earned the role **{target_role.name}**!")
+                await member.send(f"You've reached {wins_count} wins and earned the role **{target_role.name}**!")
             
             if roles_to_remove:
                 await member.remove_roles(*roles_to_remove)
@@ -209,7 +221,7 @@ async def award_winner_roles(member: discord.Member):
             print(f"Error managing role: {e}")
 
 
-# --- Admin Commands (Now using Custom Check) ---
+# --- Admin Commands ---
 
 @bot.command(name='setitem', help='[ADMIN] Sets the correct item name for the game.')
 @is_authorized_admin()
@@ -225,7 +237,7 @@ async def set_item_name(ctx, *, item_name: str):
     await bot.change_presence(activity=discord.Game(name=f"Waiting for hints (!sethint)"))
 
 
-@bot.command(name='sethint', help='[ADMIN] Sets hints 1 through 5. Usage: !sethint 1 This is the first hint...')
+@bot.command(name='sethint', help=f'[ADMIN] Sets hints 1 through {REQUIRED_HINTS}. Usage: !sethint 1 This is the first hint...')
 @is_authorized_admin()
 async def set_hint(ctx, number: int, *, hint_text: str):
     global is_game_active, current_hints_storage
@@ -233,15 +245,17 @@ async def set_hint(ctx, number: int, *, hint_text: str):
     if is_game_active:
         await ctx.send("Cannot modify hints while a game is running.")
         return
-        
-    if not 1 <= number <= 5:
-        await ctx.send("❌ Hint number must be between 1 and 5.")
+    
+    # Změněno z 5 na REQUIRED_HINTS (7)
+    if not 1 <= number <= REQUIRED_HINTS: 
+        await ctx.send(f"❌ Hint number must be between 1 and {REQUIRED_HINTS}.")
         return
 
     current_hints_storage[number] = hint_text.strip()
-    await ctx.send(f"✅ Hint No. **{number}/5** has been set.")
+    await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set.")
     
-    if correct_answer and len(current_hints_storage) == 5:
+    # Změněno z 5 na REQUIRED_HINTS (7)
+    if correct_answer and len(current_hints_storage) == REQUIRED_HINTS: 
         await bot.change_presence(activity=discord.Game(name=f"Ready! (!start)"))
 
 
@@ -282,7 +296,7 @@ async def stop_game(ctx):
     await ctx.send("The current game has been stopped and item settings cleared. You can set up a new game.")
     await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
 
-# --- Game Commands (Unchanged) ---
+# --- Game Commands ---
 @bot.command(name='start', help='Starts a new game with the configured item.')
 async def start_game(ctx):
     global correct_answer, is_game_active, current_hints_revealed, last_hint_reveal_time
@@ -291,8 +305,9 @@ async def start_game(ctx):
         await ctx.send("A game is already running! Try guessing with `!guess <item>`.")
         return
 
-    if not correct_answer or len(current_hints_storage) != 5:
-        await ctx.send(f"❌ The administrator must first set the item and all 5 hints using `!setitem` and `!sethint <1-5> ...`")
+    # Změněno z 5 na REQUIRED_HINTS (7)
+    if not correct_answer or len(current_hints_storage) != REQUIRED_HINTS: 
+        await ctx.send(f"❌ The administrator must first set the item and all {REQUIRED_HINTS} hints using `!setitem` and `!sethint <1-{REQUIRED_HINTS}> ...`")
         return
 
     is_game_active = True
@@ -301,16 +316,19 @@ async def start_game(ctx):
     first_hint_text = current_hints_storage[1]
     last_hint_reveal_time = datetime.now()
     
+    # Store the channel ID where the game started for hint sending
     current_hints_revealed.append({'hint_number': 1, 'text': first_hint_text, 'channel_id': ctx.channel.id})
 
     print(f"New game started, item is {correct_answer}")
     await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
     await ctx.send(
-        f'Hello, **{ctx.author.display_name}**! A new item guessing game has started. '
-        f'Hints will be revealed every **{hint_timing_minutes} minutes**.'
-        f'\n\n**First Hint (1/5):** {first_hint_text}'
-        f'\n\nStart guessing with `!guess <item name>`!'
+        f'A new item guessing game has started. Hints will be revealed every **{hint_timing_minutes} minutes**.'
+        f'\n\n**First Hint (1/{REQUIRED_HINTS}):** {first_hint_text}'
+        f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per hour limit.)'
     )
+
+# Dictionary to track last guess time for cooldown
+last_guess_time = {} 
 
 @bot.command(name='guess', help='Attempts to guess the item name.')
 async def guess_item(ctx, *, guess: str):
@@ -320,8 +338,34 @@ async def guess_item(ctx, *, guess: str):
         await ctx.send("No active game. Start a new one with `!start`.")
         return
     
+    # Kontrola, zda je příkaz použit v kanálu pro žebříček
+    if ctx.channel.id == WINS_CHANNEL_ID:
+        # Tuto kontrolu by měl primárně zachytit globální check, ale zde je explicitní blokování !guess v tomto kanálu
+        await ctx.send("❌ Hádání (`!guess`) není v tomto kanálu povoleno. Použijte herní kategorii.", delete_after=10)
+        return
+
+    user_id = ctx.author.id
+    now = datetime.now()
+    cooldown_minutes = 60 # One hour
+    
+    # Check cooldown
+    if user_id in last_guess_time:
+        time_since_last_guess = now - last_guess_time[user_id]
+        if time_since_last_guess < timedelta(minutes=cooldown_minutes):
+            remaining_time = timedelta(minutes=cooldown_minutes) - time_since_last_guess
+            seconds = int(remaining_time.total_seconds())
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            
+            await ctx.send(f"🛑 **Cooldown Active:** You must wait **{hours}h {minutes}m** before guessing again.", delete_after=5)
+            return
+
+    # Record the new guess time *before* checking accuracy
+    last_guess_time[user_id] = now
+    
+    # Check the guess (case-insensitive)
     if guess.strip().lower() == correct_answer.lower():
-        await ctx.send(f"🎉 **Congratulations, {ctx.author.display_name}!** You guessed the item: **{correct_answer}**!")
+        await ctx.send(f"🎉 **Congratulations, {ctx.author.display_name}!** You guessed the item: **{correct_answer}**! The game is over!")
         
         if hint_timer.is_running():
             hint_timer.stop()
@@ -329,35 +373,43 @@ async def guess_item(ctx, *, guess: str):
         await award_winner_roles(ctx.author)
 
         is_game_active = False
-        await ctx.send("Game over. Use `!setitem` to set up the next item, then `!start`.")
-    else:
-        await ctx.send(f"❌ Wrong! **{ctx.author.display_name}**, try again. Check the hints!")
+        correct_answer = None # Clear item for next round
+        current_hints_revealed = []
+        current_hints_storage = {}
 
-# --- Leaderboard Command (Renamed) ---
+        await ctx.send("Admin can now set up the next round with `!setitem`.")
+    else:
+        await ctx.send(f"❌ Wrong! **{ctx.author.display_name}**, that's not it. You can guess again in 60 minutes.")
+
+# --- Leaderboard Command ---
 
 @bot.command(name='wins', aliases=['lbc', 'top'], help='Displays the top 10 winners.')
 async def show_leaderboard(ctx):
-    """Displays the winners leaderboard."""
+    """Displays the winners leaderboard and shows user's own win count."""
+    
+    user_id = ctx.author.id
+    user_wins_count = user_wins.get(user_id, 0)
+
     if not user_wins:
-        await ctx.send("No one has won yet! Be the first to guess correctly.")
+        await ctx.send(f"Nikdo zatím nevyhrál! Buďte první, kdo uhodne. (Vaše výhry: 0)")
         return
 
     sorted_winners = sorted(user_wins.items(), key=lambda item: item[1], reverse=True)
     
     leaderboard_embed = discord.Embed(
         title="🏆 Item Guessing Leaderboard",
-        description="Top 10 users with the most correctly guessed items.",
+        description=f"Top 10 uživatelů s nejvíce uhodnutými předměty.\n\n**Vaše celkové výhry:** {user_wins_count}",
         color=discord.Color.gold()
     )
     
     rank = 1
     for user_id, wins in sorted_winners[:10]:
         member = ctx.guild.get_member(user_id)
-        member_name = member.display_name if member else f"Unknown User ({user_id})"
+        member_name = member.display_name if member else f"Neznámý Uživatel ({user_id})"
         
         leaderboard_embed.add_field(
             name=f"#{rank}. {member_name}",
-            value=f"**{wins}** wins",
+            value=f"**{wins}** výher",
             inline=False
         )
         rank += 1
@@ -366,7 +418,7 @@ async def show_leaderboard(ctx):
 
 # --- BOT STARTUP ---
 if TOKEN:
-    # 1. Start the Flask server in a separate thread
+    # 1. Start the Flask server in a separate thread (KEEP-ALIVE)
     try:
         flask_thread = threading.Thread(target=run_flask_app, daemon=True)
         flask_thread.start()
