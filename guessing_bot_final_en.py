@@ -16,7 +16,6 @@ WEB_PORT = os.getenv('PORT', 8080)
 @app.route('/')
 def home():
     """Simple Health Check endpoint required by Render for Web Services."""
-    # Změněno na češtinu pro lepší kontext při kontrole
     return "Item Guessing Bot Worker is Running! (Keep-Alive Active)", 200
 
 def run_flask_app():
@@ -27,29 +26,54 @@ def run_flask_app():
     except Exception as e:
         print(f"Error starting Flask server: {e}", file=sys.stderr)
 
-# --- DISCORD BOT & GAME CONFIGURATION ---
+# --- BOT CONFIGURATION AND CONSTANTS ---
 TOKEN = os.getenv('DISCORD_TOKEN')
-DATA_FILE = 'user_wins.json'
 
-# --- Custom Restriction IDs ---
-# ID hlavní herní kategorie
-TARGET_CATEGORY_ID = 1441691009993146490 
-# ID kanálu pro žebříček, kde funguje jen !wins
-WINS_CHANNEL_ID = 1442057049805422693 
-# ID kanálu pro hlášení vítěze
-WINNER_ANNOUNCEMENT_CHANNEL_ID = 1441858034291708059
-# ID KANÁLU PRO AUTOMATICKÉ ODESÍLÁNÍ NÁPOVĚD
-HINT_ANNOUNCEMENT_CHANNEL_ID_PERIODIC = 1441386236844572834 
-ADMIN_ROLE_IDS = [
-    1397641683205624009, 
-    1441386642332979200
-]
-# Seznam ID rolí, které mají být pingnuty při každé nové nápovědě
-HINT_PING_ROLE_IDS = [
-    1442080434073895022  # Jediná správná role pro nové nápovědy
-]
-# ID role, která má být pingnuta po skončení hry
-GAME_END_PING_ROLE_ID = 1442080784570646629 
+# Centralized Configuration Dictionary
+CONFIG = {
+    # File Persistence
+    'DATA_FILE': 'user_wins.json',
+    
+    # Game Parameters
+    'REQUIRED_HINTS': 7,
+    'GUESS_COOLDOWN_MINUTES': 60,
+    'DEFAULT_HINT_TIMING_MINUTES': 5, # Initial value, modified by !sethinttiming
+
+    # Channel and Category IDs
+    'TARGET_CATEGORY_ID': 1441691009993146490, # Main game category ID
+    'WINS_CHANNEL_ID': 1442057049805422693,    # Channel for !wins command only
+    'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, # Channel for announcing the winner
+    'HINT_CHANNEL_ID': 1441386236844572834,    # Channel for periodic hint announcements
+    
+    # Role IDs
+    'ADMIN_ROLE_IDS': [
+        1397641683205624009, 
+        1441386642332979200
+    ],
+    'HINT_PING_ROLE_IDS': [
+        1442080434073895022 # Role to ping on every new hint
+    ],
+    'GAME_END_PING_ROLE_ID': 1442080784570646629, # Role to ping when the game ends (e.g., for admins)
+
+    # Winner Roles (Key: minimum wins required, Value: Role ID)
+    'WINNER_ROLES_CONFIG': {
+        1:    1441693698776764486,
+        5:    1441693984266129469,
+        10:   1441694043477381150,
+        25:   1441694109268967505,
+        50:   1441694179011989534,
+        100:  1441694438345674855
+    }
+}
+
+# --- Game State Variables ---
+correct_answer = None
+current_hints_storage = {}
+current_hints_revealed = []
+is_game_active = False
+hint_timing_minutes = CONFIG['DEFAULT_HINT_TIMING_MINUTES'] # Can be changed via command
+last_hint_reveal_time = None
+user_wins = {}
 
 # Set up Intents
 intents = discord.Intents.default()
@@ -57,25 +81,18 @@ intents.message_content = True
 intents.members = True 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Game Variables
-correct_answer = None
-current_hints_storage = {}
-current_hints_revealed = []
-is_game_active = False
-hint_timing_minutes = 5
-last_hint_reveal_time = None
-REQUIRED_HINTS = 7 # Změněno z 5 na 7
+# --- Utility Functions ---
 
-# --- Role Configuration (Your Reward IDs) ---
-WINNER_ROLES_CONFIG = {
-    1:    1441693698776764486,
-    5:    1441693984266129469,
-    10:   1441694043477381150,
-    25:   1441694109268967505,
-    50:   1441694179011989534,
-    100:  1441694438345674855
-}
-user_wins = {}
+def format_time_remaining(seconds):
+    """Converts seconds into a clean H/M string (e.g., '1h 5m')."""
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    parts = []
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    return " ".join(parts) if parts else "a moment"
 
 # --- Custom Admin Check ---
 
@@ -87,7 +104,7 @@ def is_authorized_admin():
         
         member_roles = [role.id for role in ctx.author.roles]
         
-        for required_id in ADMIN_ROLE_IDS:
+        for required_id in CONFIG['ADMIN_ROLE_IDS']:
             if required_id in member_roles:
                 return True
                 
@@ -100,32 +117,34 @@ def is_authorized_admin():
 async def command_location_check(ctx):
     """Global check to restrict commands based on context."""
     if ctx.guild is None:
-        return True # Povolit DMs
+        return True # Allow DMs
 
-    # Check 1: Command je v hlavní herní kategorii (Většina příkazů funguje zde)
-    if ctx.channel.category_id == TARGET_CATEGORY_ID:
+    # Check 1: Command is in the main game category (Most commands work here)
+    if ctx.channel.category_id == CONFIG['TARGET_CATEGORY_ID']:
         return True
 
-    # Check 2: Command je ve speciálním kanálu pro žebříček (!wins povolen, ostatní blokovány)
-    if ctx.channel.id == WINS_CHANNEL_ID:
+    # Check 2: Command is in the specific leaderboard channel (!wins allowed, others blocked)
+    if ctx.channel.id == CONFIG['WINS_CHANNEL_ID']:
         if ctx.command.name in ['wins', 'lbc', 'top']:
-            return True # !wins je povolen
+            return True # !wins is allowed
         else:
-            # Blokovat všechny ostatní příkazy (!guess, !start, atd.)
-            await ctx.send("Tento kanál je určen pouze pro žebříček (`!wins`). Hádání a ovládání probíhá v herní kategorii.", delete_after=10)
+            # Block all other commands (!guess, !start, etc.)
+            await ctx.send("This channel is dedicated only to the leaderboard (`!wins`). Guessing and game control must take place in the main game category.", delete_after=10)
             return False
     
-    # Check 3: Příkaz je v jakémkoli jiném kanálu nebo kategorii
-    await ctx.send(f"❌ Tento příkaz lze použít pouze v herní kategorii.", delete_after=10)
+    # Check 3: Command is in any other channel or category
+    await ctx.send(f"❌ This command can only be used in the designated game category.", delete_after=10)
     return False
 
 # --- Data Persistence Functions ---
 def load_user_wins():
     global user_wins
+    DATA_FILE = CONFIG['DATA_FILE']
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r') as f:
                 data = json.load(f)
+                # Ensure keys are integers (Discord IDs)
                 user_wins = {int(k): v for k, v in data.items()}
                 print(f"Loaded {len(user_wins)} win records.")
         except json.JSONDecodeError:
@@ -135,6 +154,7 @@ def load_user_wins():
         user_wins = {}
 
 def save_user_wins():
+    DATA_FILE = CONFIG['DATA_FILE']
     try:
         with open(DATA_FILE, 'w') as f:
             json.dump(user_wins, f, indent=4)
@@ -156,23 +176,24 @@ async def hint_timer():
     
     if now >= next_reveal_time:
         next_hint_number = len(current_hints_revealed) + 1
+        REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
         
         if next_hint_number in current_hints_storage:
-            # POUŽIJEME DEDIKOVANÝ KANÁL PRO AUTOMATICKÉ NÁPOVĚDY
-            channel = bot.get_channel(HINT_ANNOUNCEMENT_CHANNEL_ID_PERIODIC)
+            # USE THE DEDICATED CHANNEL FOR AUTOMATIC HINTS
+            channel = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
             
             if channel:
                 hint_text = current_hints_storage[next_hint_number]
                 
-                # Vytvoření pingovacího řetězce pro všechny definované role
-                ping_string = "".join([f"<@&{role_id}> " for role_id in HINT_PING_ROLE_IDS])
+                # Create the ping string for all defined roles
+                ping_string = "".join([f"<@&{role_id}> " for role_id in CONFIG['HINT_PING_ROLE_IDS']])
                 
-                # Sestavíme zprávu, která obsahuje ping na role
-                ping_message = f"{ping_string}📢 **Nová Nápověda ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
+                # Construct the message including the role pings
+                ping_message = f"{ping_string}📢 **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
 
                 await channel.send(ping_message)
                 
-                # Uložíme pouze číslo a text, ID kanálu už nepotřebujeme
+                # Store the revealed hint
                 current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text}) 
                 last_hint_reveal_time = now
         
@@ -196,6 +217,7 @@ async def award_winner_roles(member: discord.Member):
 
     user_id = member.id
     guild = member.guild
+    WINNER_ROLES_CONFIG = CONFIG['WINNER_ROLES_CONFIG']
     
     user_wins[user_id] = user_wins.get(user_id, 0) + 1
     wins_count = user_wins[user_id]
@@ -206,6 +228,7 @@ async def award_winner_roles(member: discord.Member):
     achieved_role_id = None
     sorted_wins_levels = sorted(WINNER_ROLES_CONFIG.keys(), reverse=True)
     
+    # Find the highest tier role the user now qualifies for
     for level in sorted_wins_levels:
         if wins_count >= level:
             achieved_role_id = WINNER_ROLES_CONFIG[level]
@@ -220,16 +243,19 @@ async def award_winner_roles(member: discord.Member):
 
         all_winner_role_ids = list(WINNER_ROLES_CONFIG.values())
         
+        # Identify lower-tier roles to remove
         roles_to_remove = [
             role for role in member.roles 
             if role.id in all_winner_role_ids and role.id != achieved_role_id
         ]
 
         try:
+            # Add the new or current highest role
             if target_role not in member.roles:
                 await member.add_roles(target_role)
                 await member.send(f"You've reached {wins_count} wins and earned the role **{target_role.name}**!")
             
+            # Remove redundant lower-tier roles
             if roles_to_remove:
                 await member.remove_roles(*roles_to_remove)
                 
@@ -255,16 +281,17 @@ async def set_item_name(ctx, *, item_name: str):
     await bot.change_presence(activity=discord.Game(name=f"Waiting for hints (!sethint)"))
 
 
-@bot.command(name='sethint', help=f'[ADMIN] Sets hints 1 through {REQUIRED_HINTS}. Usage: !sethint 1 This is the first hint...')
+@bot.command(name='sethint', help=f"[ADMIN] Sets hints 1 through {CONFIG['REQUIRED_HINTS']}. Usage: !sethint 1 This is the first hint...")
 @is_authorized_admin()
 async def set_hint(ctx, number: int, *, hint_text: str):
     global is_game_active, current_hints_storage
+
+    REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
 
     if is_game_active:
         await ctx.send("Cannot modify hints while a game is running.")
         return
     
-    # Změněno z 5 na REQUIRED_HINTS (7)
     if not 1 <= number <= REQUIRED_HINTS: 
         await ctx.send(f"❌ Hint number must be between 1 and {REQUIRED_HINTS}.")
         return
@@ -273,13 +300,13 @@ async def set_hint(ctx, number: int, *, hint_text: str):
     
     current_count = len(current_hints_storage)
     
-    # Oznámí aktuální počet nastavených nápověd
+    # Announce the current number of configured hints
     if current_count == REQUIRED_HINTS:
-        await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. **Všech {REQUIRED_HINTS} nápověd je nyní nakonfigurováno!**")
+        await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. **All {REQUIRED_HINTS} hints are now configured!**")
         if correct_answer:
             await bot.change_presence(activity=discord.Game(name=f"Ready! (!start)"))
     else:
-        await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. Aktuálně nakonfigurovaných nápověd: **{current_count}/{REQUIRED_HINTS}**.")
+        await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. Currently configured hints: **{current_count}/{REQUIRED_HINTS}**.")
 
 
 @bot.command(name='sethinttiming', help='[ADMIN] Sets the interval for revealing hints (in minutes).')
@@ -324,11 +351,12 @@ async def stop_game(ctx):
 async def start_game(ctx):
     global correct_answer, is_game_active, current_hints_revealed, last_hint_reveal_time
     
+    REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
+
     if is_game_active:
         await ctx.send("A game is already running! Try guessing with `!guess <item>`.")
         return
 
-    # Změněno z 5 na REQUIRED_HINTS (7)
     if not correct_answer or len(current_hints_storage) != REQUIRED_HINTS: 
         await ctx.send(f"❌ The administrator must first set the item and all {REQUIRED_HINTS} hints using `!setitem` and `!sethint <1-{REQUIRED_HINTS}> ...`")
         return
@@ -339,32 +367,32 @@ async def start_game(ctx):
     first_hint_text = current_hints_storage[1]
     last_hint_reveal_time = datetime.now()
     
-    # Přesunuto na dedikovaný kanál pro nápovědy
-    announcement_channel = bot.get_channel(HINT_ANNOUNCEMENT_CHANNEL_ID_PERIODIC)
+    # Go to the dedicated channel for hints
+    announcement_channel = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
 
     if not announcement_channel:
-        is_game_active = False # Zrušit spuštění hry
-        await ctx.send("❌ Chyba: Kanál pro automatické nápovědy nebyl nalezen. Zkontrolujte ID.")
+        is_game_active = False # Cancel game start
+        await ctx.send("❌ Error: The automatic hint channel was not found. Please check the ID.")
         return
 
-    # Store the first revealed hint (only number and text, channel ID is no longer needed in the list)
+    # Store the first revealed hint
     current_hints_revealed.append({'hint_number': 1, 'text': first_hint_text})
 
     print(f"New game started, item is {correct_answer}")
     await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
     
-    # Sestavíme zprávu pro první nápovědu (bez pingu, aby se zabránilo spamování hned na začátku)
+    # Construct the message for the first hint
     start_message = (
         f'A new item guessing game has started. Hints will be revealed every **{hint_timing_minutes} minutes**.'
         f'\n\n**First Hint (1/{REQUIRED_HINTS}):** {first_hint_text}'
         f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per hour limit.)'
     )
     
-    # Odeslání první nápovědy do dedikovaného kanálu
+    # Send the first hint to the dedicated channel
     await announcement_channel.send(start_message)
 
-    # Oznámení pro admina/volajícího, že hra byla spuštěna a kam nápověda šla
-    await ctx.send(f"✅ Hra byla spuštěna! První nápověda byla odeslána do kanálu {announcement_channel.mention}.")
+    # Acknowledge the start to the admin/caller
+    await ctx.send(f"✅ The game has started! The first hint has been sent to {announcement_channel.mention}.")
 
 # Dictionary to track last guess time for cooldown
 last_guess_time = {} 
@@ -377,15 +405,14 @@ async def guess_item(ctx, *, guess: str):
         await ctx.send("No active game. Start a new one with `!start`.")
         return
     
-    # Kontrola, zda je příkaz použit v kanálu pro žebříček
-    if ctx.channel.id == WINS_CHANNEL_ID:
-        # Tuto kontrolu by měl primárně zachytit globální check, ale zde je explicitní blokování !guess v tomto kanálu
-        await ctx.send("❌ Hádání (`!guess`) není v tomto kanálu povoleno. Použijte herní kategorii.", delete_after=10)
+    # Check if the command is used in the leaderboard channel (should be caught by global check, but included for robustness)
+    if ctx.channel.id == CONFIG['WINS_CHANNEL_ID']:
+        await ctx.send("❌ Guessing (`!guess`) is not allowed in this channel. Please use the main game category.", delete_after=10)
         return
 
     user_id = ctx.author.id
     now = datetime.now()
-    cooldown_minutes = 60 # One hour
+    cooldown_minutes = CONFIG['GUESS_COOLDOWN_MINUTES']
     
     # Check cooldown
     if user_id in last_guess_time:
@@ -393,10 +420,9 @@ async def guess_item(ctx, *, guess: str):
         if time_since_last_guess < timedelta(minutes=cooldown_minutes):
             remaining_time = timedelta(minutes=cooldown_minutes) - time_since_last_guess
             seconds = int(remaining_time.total_seconds())
-            hours = seconds // 3600
-            minutes = (seconds % 3600) // 60
+            time_remaining_str = format_time_remaining(seconds)
             
-            await ctx.send(f"🛑 **Cooldown Active:** You must wait **{hours}h {minutes}m** before guessing again.", delete_after=5)
+            await ctx.send(f"🛑 **Cooldown Active:** You must wait **{time_remaining_str}** before guessing again.", delete_after=5)
             return
 
     # Record the new guess time *before* checking accuracy
@@ -404,14 +430,14 @@ async def guess_item(ctx, *, guess: str):
     
     # Check the guess (case-insensitive)
     if guess.strip().lower() == correct_answer.lower():
-        # 1. Oznámení ve stávajícím kanále
+        # 1. Announce in the current channel
         await ctx.send(f"🎉 **Congratulations, {ctx.author.display_name}!** You guessed the item: **{correct_answer}**! The game is over!")
 
-        # 2. Oznámení v dedikovaném kanále s pingem
-        announcement_channel = bot.get_channel(WINNER_ANNOUNCEMENT_CHANNEL_ID)
+        # 2. Announce in the dedicated winner channel
+        announcement_channel = bot.get_channel(CONFIG['WINNER_ANNOUNCEMENT_CHANNEL_ID'])
         if announcement_channel:
             winner_ping = ctx.author.mention
-            message = f"🏆 **VÍTĚZ KOLA!** {winner_ping} právě uhodl předmět. Správná odpověď byla: **{correct_answer}**!"
+            message = f"🏆 **ROUND WINNER!** {winner_ping} just guessed the item. The correct answer was: **{correct_answer}**!"
             await announcement_channel.send(message)
         
         if hint_timer.is_running():
@@ -424,12 +450,14 @@ async def guess_item(ctx, *, guess: str):
         current_hints_revealed = []
         current_hints_storage = {}
         
-        # Ping role při konci hry (adminům pro nastavení další hry)
-        game_end_ping_string = f"<@&{GAME_END_PING_ROLE_ID}>"
-        await ctx.send(f"{game_end_ping_string} ✅ Hra skončila a správce může nastavit další kolo pomocí `!setitem`.")
+        # Ping the game end role (for admins to set up the next game)
+        game_end_ping_string = f"<@&{CONFIG['GAME_END_PING_ROLE_ID']}>"
+        await ctx.send(f"{game_end_ping_string} ✅ The game has ended and an admin can set up the next round using `!setitem`.")
 
     else:
-        await ctx.send(f"❌ Wrong! **{ctx.author.display_name}**, that's not it. You can guess again in 60 minutes.")
+        # Show cooldown time in the message
+        cooldown_display = format_time_remaining(CONFIG['GUESS_COOLDOWN_MINUTES'] * 60)
+        await ctx.send(f"❌ Wrong! **{ctx.author.display_name}**, that's not it. You can guess again in {cooldown_display}.")
 
 # --- Leaderboard Command ---
 
@@ -441,25 +469,26 @@ async def show_leaderboard(ctx):
     user_wins_count = user_wins.get(user_id, 0)
 
     if not user_wins:
-        await ctx.send(f"Nikdo zatím nevyhrál! Buďte první, kdo uhodne. (Vaše výhry: 0)")
+        await ctx.send(f"No one has won yet! Be the first to guess. (Your wins: 0)")
         return
 
     sorted_winners = sorted(user_wins.items(), key=lambda item: item[1], reverse=True)
     
     leaderboard_embed = discord.Embed(
         title="🏆 Item Guessing Leaderboard",
-        description=f"Top 10 uživatelů s nejvíce uhodnutými předměty.\n\n**Vaše celkové výhry:** {user_wins_count}",
+        description=f"Top 10 users with the most guessed items.\n\n**Your total wins:** {user_wins_count}",
         color=discord.Color.gold()
     )
     
     rank = 1
     for user_id, wins in sorted_winners[:10]:
         member = ctx.guild.get_member(user_id)
-        member_name = member.display_name if member else f"Neznámý Uživatel ({user_id})"
+        # Fallback in case the member object is not found
+        member_name = member.display_name if member else f"Unknown User ({user_id})"
         
         leaderboard_embed.add_field(
             name=f"#{rank}. {member_name}",
-            value=f"**{wins}** výher",
+            value=f"**{wins}** wins",
             inline=False
         )
         rank += 1
