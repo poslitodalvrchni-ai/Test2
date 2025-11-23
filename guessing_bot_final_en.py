@@ -336,24 +336,22 @@ async def set_hint_timing(ctx, minutes: int):
     await ctx.send(f"✅ Hint revealing interval set to **{minutes} minutes**.")
 
 
-@bot.command(name='stop', help='[ADMIN] Ends the current game and clears settings.')
+@bot.command(name='stop', help='[ADMIN] Forcefully ends the current game and resets ALL game settings.')
 @is_authorized_admin()
 async def stop_game(ctx):
-    global is_game_active, correct_answer, current_hints_revealed, current_hints_storage
+    global is_game_active, correct_answer, current_hints_revealed, current_hints_storage, last_hint_reveal_time
 
-    if not is_game_active:
-        await ctx.send("No active game to stop.")
-        return
-    
+    # Perform the full reset regardless of the current state of is_game_active
     is_game_active = False
     correct_answer = None
     current_hints_revealed = []
     current_hints_storage = {}
+    last_hint_reveal_time = None
     
     if hint_timer.is_running():
         hint_timer.stop()
         
-    await ctx.send("The current game has been stopped and item settings cleared. You can set up a new game.")
+    await ctx.send("🚨 **Game State Forcefully Reset.** All item and hint settings have been cleared. The bot is ready to set up a new game using `!setitem`.")
     await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
 
 # --- Game Commands ---
@@ -438,6 +436,12 @@ async def guess_item(ctx, *, guess: str):
     # Record the new guess time *before* checking accuracy
     last_guess_time[user_id] = now
     
+    # Check the guess (case-insensitive)
+    if not correct_answer:
+        # Failsafe for corruption: If the game is active but no answer is set
+        await ctx.send("❌ Internal Error: The game is active, but the correct answer is missing. Please ask an admin to run `!stop` to reset the game.")
+        return
+
     # Check the guess (case-insensitive)
     if guess.strip().lower() == correct_answer.lower():
         # 1. Announce in the current channel
