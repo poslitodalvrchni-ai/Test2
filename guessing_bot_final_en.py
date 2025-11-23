@@ -33,6 +33,7 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 CONFIG = {
     # File Persistence
     'DATA_FILE': 'user_wins.json',
+    'GAME_STATE_FILE': 'game_state.json', # NEW: File for game state persistence
     
     # Game Parameters
     'REQUIRED_HINTS': 7,
@@ -142,7 +143,7 @@ async def command_location_check(ctx):
     await ctx.send(f"❌ This command can only be used in the designated game category.", delete_after=10)
     return False
 
-# --- Data Persistence Functions ---
+# --- Data Persistence Functions (User Wins) ---
 def load_user_wins():
     global user_wins
     DATA_FILE = CONFIG['DATA_FILE']
@@ -167,6 +168,61 @@ def save_user_wins():
             print("Win data saved.")
     except Exception as e:
         print(f"ERROR SAVING DATA: {e}")
+
+# --- NEW: Game State Persistence Functions ---
+def save_game_state():
+    """Saves the critical game state variables to a JSON file."""
+    global correct_answer, current_hints_storage, current_hints_revealed, is_game_active, last_hint_reveal_time, hint_timing_minutes
+    
+    # Prepare the state for JSON serialization
+    state = {
+        'is_game_active': is_game_active,
+        'correct_answer': correct_answer,
+        # Convert keys of current_hints_storage to strings for JSON
+        'current_hints_storage': {str(k): v for k, v in current_hints_storage.items()},
+        'current_hints_revealed': current_hints_revealed,
+        # Convert datetime object to ISO 8601 string for persistence
+        'last_hint_reveal_time': last_hint_reveal_time.isoformat() if last_hint_reveal_time else None,
+        'hint_timing_minutes': hint_timing_minutes
+    }
+    
+    try:
+        with open(CONFIG['GAME_STATE_FILE'], 'w') as f:
+            json.dump(state, f, indent=4)
+            print("Game state saved.")
+    except Exception as e:
+        print(f"ERROR SAVING GAME STATE: {e}")
+
+def load_game_state():
+    """Loads the game state from a JSON file."""
+    global correct_answer, current_hints_storage, current_hints_revealed, is_game_active, last_hint_reveal_time, hint_timing_minutes
+    
+    STATE_FILE = CONFIG['GAME_STATE_FILE']
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                state = json.load(f)
+                
+                is_game_active = state.get('is_game_active', False)
+                correct_answer = state.get('correct_answer')
+                # Convert keys of current_hints_storage back to integers
+                current_hints_storage = {int(k): v for k, v in state.get('current_hints_storage', {}).items()}
+                current_hints_revealed = state.get('current_hints_revealed', [])
+                hint_timing_minutes = state.get('hint_timing_minutes', CONFIG['DEFAULT_HINT_TIMING_MINUTES'])
+                
+                last_time_str = state.get('last_hint_reveal_time')
+                if last_time_str:
+                    last_hint_reveal_time = datetime.fromisoformat(last_time_str)
+                else:
+                    last_hint_reveal_time = None
+
+                print(f"Game state loaded. Active: {is_game_active}")
+                
+        except json.JSONDecodeError:
+            print("ERROR: game_state.json is corrupted or empty. Starting fresh.")
+            is_game_active = False
+    
+# --- END NEW: Game State Persistence Functions ---
 
 
 # --- Timed Hint Task ---
@@ -203,6 +259,7 @@ async def hint_timer():
                     # Store the revealed hint and reset the timer
                     current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text}) 
                     last_hint_reveal_time = now
+                    save_game_state() # SAVE STATE after a hint reveal
                 else:
                     print(f"Warning: Hint channel ID {CONFIG['HINT_CHANNEL_ID']} not found.")
             
@@ -220,7 +277,14 @@ async def hint_timer():
 async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
     load_user_wins()
-    await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
+    load_game_state() # NEW: Load game state on startup
+    
+    if is_game_active:
+        await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
+        print(f"Resuming active game for item: {correct_answer}")
+    else:
+        await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
+        
     if not hint_timer.is_running():
         hint_timer.start()
 
@@ -290,6 +354,7 @@ async def set_item_name(ctx, *, item_name: str):
         return
 
     correct_answer = item_name.strip()
+    save_game_state() # NEW: Save state after setting item
     await ctx.send(f"✅ Correct item set to: **{correct_answer}**.")
     await bot.change_presence(activity=discord.Game(name=f"Waiting for hints (!sethint or !setallhints)"))
 
@@ -315,6 +380,7 @@ async def set_hint(ctx, number: int, *, hint_text: str):
     
     # Announce the current number of configured hints
     if current_count == REQUIRED_HINTS:
+        save_game_state() # NEW: Save state when fully configured
         await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. **All {REQUIRED_HINTS} hints are now configured!**")
         if correct_answer:
             await bot.change_presence(activity=discord.Game(name=f"Ready! (!start)"))
@@ -349,6 +415,8 @@ async def set_all_hints(ctx, *, hints_text: str):
     for i, hint_text in enumerate(hint_lines, 1):
         current_hints_storage[i] = hint_text
 
+    save_game_state() # NEW: Save state when fully configured
+
     await ctx.send(
         f"✅ Successfully set **all {REQUIRED_HINTS} hints** at once! The game is ready to start."
     )
@@ -371,6 +439,7 @@ async def set_hint_timing(ctx, minutes: int):
         return
     
     hint_timing_minutes = minutes
+    save_game_state() # NEW: Save state after setting timing
     await ctx.send(f"✅ Hint revealing interval set to **{minutes} minutes**.")
 
 
@@ -388,6 +457,8 @@ async def stop_game(ctx):
     
     if hint_timer.is_running():
         hint_timer.stop()
+
+    save_game_state() # NEW: Save cleared state
         
     await ctx.send("🚨 **Game State Forcefully Reset.** All item and hint settings have been cleared. The bot is ready to set up a new game using `!setitem`.")
     await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
@@ -422,7 +493,9 @@ async def game_status(ctx):
         time_until_next = next_reveal - datetime.now()
         
         if time_until_next.total_seconds() > 0:
-            next_hint_time_str = f"In {format_time_remaining(int(time_until_next.total_seconds()))} (at {next_reveal.strftime('%H:%M:%S %Z')})"
+            # Added a small safety check in case the calculation is slightly negative
+            seconds = int(time_until_next.total_seconds())
+            next_hint_time_str = f"In {format_time_remaining(seconds)} (at {next_reveal.strftime('%H:%M:%S %Z')})"
         else:
             next_hint_time_str = "⏳ Due now (Waiting for next minute loop)"
 
@@ -445,7 +518,7 @@ async def game_status(ctx):
     
     # Timer Details (only if a game is/was active)
     timer_details = (
-        f"**Revealed:** {revealed_text}\n"
+        f"**Revealed:** {revealed_count} hints\n"
         f"**Last Reveal:** {last_hint_reveal_time.strftime('%H:%M:%S %Z') if last_hint_reveal_time else 'N/A'}\n"
         f"**Next Reveal:** {next_hint_time_str}"
     )
@@ -475,6 +548,9 @@ async def start_game(ctx):
     first_hint_text = current_hints_storage[1]
     last_hint_reveal_time = datetime.now()
     
+    # Save the active state and first hint details
+    save_game_state() # NEW: Save active state immediately
+
     # Go to the dedicated channel for hints
     announcement_channel = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
 
@@ -485,6 +561,7 @@ async def start_game(ctx):
 
     # Store the first revealed hint
     current_hints_revealed.append({'hint_number': 1, 'text': first_hint_text})
+    save_game_state() # Save state after storing first hint
 
     print(f"New game started, item is {correct_answer}")
     await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
@@ -562,10 +639,13 @@ async def guess_item(ctx, *, guess: str):
         
         await award_winner_roles(ctx.author)
 
+        # Reset game variables
         is_game_active = False
         correct_answer = None # Clear item for next round
         current_hints_revealed = []
         current_hints_storage = {}
+        
+        save_game_state() # NEW: Save cleared state after a win
         
         # Ping the game end role (for admins to set up the next game)
         game_end_ping_string = f"<@&{CONFIG['GAME_END_PING_ROLE_ID']}>"
