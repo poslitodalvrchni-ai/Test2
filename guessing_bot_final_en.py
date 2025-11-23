@@ -96,6 +96,10 @@ def format_time_remaining(seconds):
         parts.append(f"{minutes}m")
     return " ".join(parts) if parts else "a moment"
 
+def generate_hint_ping_string():
+    """Generates the ping string for all defined hint ping roles."""
+    return "".join([f"<@&{role_id}> " for role_id in CONFIG['HINT_PING_ROLE_IDS']])
+
 # --- Custom Admin Check ---
 
 def is_authorized_admin():
@@ -188,8 +192,8 @@ async def hint_timer():
                 if channel:
                     hint_text = current_hints_storage[next_hint_number]
                     
-                    # Create the ping string for all defined roles
-                    ping_string = "".join([f"<@&{role_id}> " for role_id in CONFIG['HINT_PING_ROLE_IDS']])
+                    # Use the new utility function for ping string
+                    ping_string = generate_hint_ping_string()
                     
                     # Construct the message including the role pings
                     ping_message = f"{ping_string}📢 **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
@@ -287,7 +291,7 @@ async def set_item_name(ctx, *, item_name: str):
 
     correct_answer = item_name.strip()
     await ctx.send(f"✅ Correct item set to: **{correct_answer}**.")
-    await bot.change_presence(activity=discord.Game(name=f"Waiting for hints (!sethint)"))
+    await bot.change_presence(activity=discord.Game(name=f"Waiting for hints (!sethint or !setallhints)"))
 
 
 @bot.command(name='sethint', help=f"[ADMIN] Sets hints 1 through {CONFIG['REQUIRED_HINTS']}. Usage: !sethint 1 This is the first hint...")
@@ -316,6 +320,40 @@ async def set_hint(ctx, number: int, *, hint_text: str):
             await bot.change_presence(activity=discord.Game(name=f"Ready! (!start)"))
     else:
         await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. Currently configured hints: **{current_count}/{REQUIRED_HINTS}**.")
+
+
+@bot.command(name='setallhints', help=f'[ADMIN] Sets all {CONFIG["REQUIRED_HINTS"]} hints at once, separated by new lines.')
+@is_authorized_admin()
+async def set_all_hints(ctx, *, hints_text: str):
+    global is_game_active, current_hints_storage
+
+    REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
+
+    if is_game_active:
+        await ctx.send("Cannot modify hints while a game is running.")
+        return
+    
+    # Split the input text by newline characters, handling potential leading/trailing whitespace
+    # We filter out empty lines that might result from trailing newlines or extra spacing.
+    hint_lines = [line.strip() for line in hints_text.split('\n') if line.strip()]
+
+    if len(hint_lines) != REQUIRED_HINTS: 
+        await ctx.send(
+            f"❌ Error: You must provide exactly **{REQUIRED_HINTS}** hints, one per line. "
+            f"You provided {len(hint_lines)}. Please ensure you use a multi-line code block in Discord."
+        )
+        return
+    
+    # Clear existing hints and set the new ones
+    current_hints_storage = {}
+    for i, hint_text in enumerate(hint_lines, 1):
+        current_hints_storage[i] = hint_text
+
+    await ctx.send(
+        f"✅ Successfully set **all {REQUIRED_HINTS} hints** at once! The game is ready to start."
+    )
+    if correct_answer:
+        await bot.change_presence(activity=discord.Game(name=f"Ready! (!start)"))
 
 
 @bot.command(name='sethinttiming', help='[ADMIN] Sets the interval for revealing hints (in minutes).')
@@ -354,6 +392,68 @@ async def stop_game(ctx):
     await ctx.send("🚨 **Game State Forcefully Reset.** All item and hint settings have been cleared. The bot is ready to set up a new game using `!setitem`.")
     await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
 
+
+@bot.command(name='status', help='[ADMIN] Displays the current game status and configuration.')
+@is_authorized_admin()
+async def game_status(ctx):
+    """Displays the current game state for admin diagnosis."""
+    global is_game_active, correct_answer, hint_timing_minutes, current_hints_storage, last_hint_reveal_time, current_hints_revealed
+
+    REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
+    
+    # Game Status Check
+    status_emoji = "🟢 ACTIVE" if is_game_active else "🔴 INACTIVE"
+    
+    # Answer Status Check
+    answer_status = f"**{correct_answer}**" if correct_answer else "❌ Not Set"
+
+    # Hint Configuration Status
+    configured_hints = len(current_hints_storage)
+    hint_status = f"✅ All {REQUIRED_HINTS} hints configured." if configured_hints == REQUIRED_HINTS else f"⚠️ {configured_hints}/{REQUIRED_HINTS} hints configured."
+
+    # Revealed Hints Status
+    revealed_count = len(current_hints_revealed)
+    revealed_text = f"{revealed_count}/{configured_hints} Revealed."
+    
+    # Next Hint Time
+    next_hint_time_str = "N/A"
+    if is_game_active and last_hint_reveal_time:
+        next_reveal = last_hint_reveal_time + timedelta(minutes=hint_timing_minutes)
+        time_until_next = next_reveal - datetime.now()
+        
+        if time_until_next.total_seconds() > 0:
+            next_hint_time_str = f"In {format_time_remaining(int(time_until_next.total_seconds()))} (at {next_reveal.strftime('%H:%M:%S %Z')})"
+        else:
+            next_hint_time_str = "⏳ Due now (Waiting for next minute loop)"
+
+    # Construct the Embed
+    embed = discord.Embed(
+        title="🎮 Current Game Status",
+        description=f"Status: **{status_emoji}**",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(name="Correct Answer", value=answer_status, inline=False)
+    
+    # Hint Details
+    hint_details = (
+        f"**Required:** {REQUIRED_HINTS}\n"
+        f"**Configured:** {hint_status}\n"
+        f"**Interval:** {hint_timing_minutes} minutes"
+    )
+    embed.add_field(name="Hint Configuration", value=hint_details, inline=True)
+    
+    # Timer Details (only if a game is/was active)
+    timer_details = (
+        f"**Revealed:** {revealed_text}\n"
+        f"**Last Reveal:** {last_hint_reveal_time.strftime('%H:%M:%S %Z') if last_hint_reveal_time else 'N/A'}\n"
+        f"**Next Reveal:** {next_hint_time_str}"
+    )
+    embed.add_field(name="Hint Timer", value=timer_details, inline=True)
+
+    await ctx.send(embed=embed)
+
+
 # --- Game Commands ---
 @bot.command(name='start', help='Starts a new game with the configured item.')
 async def start_game(ctx):
@@ -366,7 +466,7 @@ async def start_game(ctx):
         return
 
     if not correct_answer or len(current_hints_storage) != REQUIRED_HINTS: 
-        await ctx.send(f"❌ The administrator must first set the item and all {REQUIRED_HINTS} hints using `!setitem` and `!sethint <1-{REQUIRED_HINTS}> ...`")
+        await ctx.send(f"❌ The administrator must first set the item and all {REQUIRED_HINTS} hints using `!setitem` and `!sethint <1-{REQUIRED_HINTS}> ...` or `!setallhints`")
         return
 
     is_game_active = True
@@ -389,9 +489,11 @@ async def start_game(ctx):
     print(f"New game started, item is {correct_answer}")
     await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
     
-    # Construct the message for the first hint
+    # Generate ping string and construct the message for the first hint
+    ping_string = generate_hint_ping_string()
+
     start_message = (
-        f'A new item guessing game has started. Hints will be revealed every **{hint_timing_minutes} minutes**.'
+        f'{ping_string}📢 **A new item guessing game has started!** Hints will be revealed every **{hint_timing_minutes} minutes**.'
         f'\n\n**First Hint (1/{REQUIRED_HINTS}):** {first_hint_text}'
         f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per hour limit.)'
     )
@@ -430,7 +532,8 @@ async def guess_item(ctx, *, guess: str):
             seconds = int(remaining_time.total_seconds())
             time_remaining_str = format_time_remaining(seconds)
             
-            await ctx.send(f"🛑 **Cooldown Active:** You must wait **{time_remaining_str}** before guessing again.", delete_after=5)
+            # Use ctx.reply for better visibility
+            await ctx.reply(f"🛑 **Cooldown Active:** You must wait **{time_remaining_str}** before guessing again.", delete_after=5)
             return
 
     # Record the new guess time *before* checking accuracy
