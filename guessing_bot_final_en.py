@@ -40,6 +40,8 @@ ADMIN_ROLE_IDS = [
     1397641683205624009, 
     1441386642332979200
 ]
+# ID role, která má být pingnuta při každé nové nápovědě
+HINT_PING_ROLE_ID = 1441388270201077882
 
 # Set up Intents
 intents = discord.Intents.default()
@@ -153,7 +155,10 @@ async def hint_timer():
             
             if channel:
                 hint_text = current_hints_storage[next_hint_number]
-                await channel.send(f"⏳ **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}")
+                # Sestavíme zprávu, která obsahuje ping na roli
+                ping_message = f"<@&{HINT_PING_ROLE_ID}> 📢 **Nová Nápověda ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
+
+                await channel.send(ping_message)
                 
                 current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text, 'channel_id': channel.id})
                 last_hint_reveal_time = now
@@ -321,11 +326,14 @@ async def start_game(ctx):
 
     print(f"New game started, item is {correct_answer}")
     await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
-    await ctx.send(
+    
+    # Sestavíme zprávu pro první nápovědu (bez pingu, aby se zabránilo spamování hned na začátku)
+    start_message = (
         f'A new item guessing game has started. Hints will be revealed every **{hint_timing_minutes} minutes**.'
         f'\n\n**First Hint (1/{REQUIRED_HINTS}):** {first_hint_text}'
         f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per hour limit.)'
     )
+    await ctx.send(start_message)
 
 # Dictionary to track last guess time for cooldown
 last_guess_time = {} 
