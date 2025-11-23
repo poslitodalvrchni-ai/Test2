@@ -55,8 +55,8 @@ CONFIG = {
 	'HINT_PING_ROLE_IDS': [
 		1441388270201077882 # Role to ping on every new hint
 	],
-	'GAME_END_PING_ROLE_ID': 1441386642332979200,
-	1397641683205624009 # Role to ping when the game ends (e.g., for admins)
+	# FIX: This line was causing a SyntaxError. We use only one ID now.
+	'GAME_END_PING_ROLE_ID': 1441386642332979200, 
 
 	# Winner Roles (Key: minimum wins required, Value: Role ID) (***UPDATE THESE PLACEHOLDERS***)
 	'WINNER_ROLES_CONFIG': {
