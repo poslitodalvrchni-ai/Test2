@@ -53,9 +53,10 @@ CONFIG = {
 		1441386642332979200
 	],
 	'HINT_PING_ROLE_IDS': [
-		1442080434073895022 # Role to ping on every new hint
+		1441388270201077882 # Role to ping on every new hint
 	],
-	'GAME_END_PING_ROLE_ID': 1442080784570646629, # Role to ping when the game ends (e.g., for admins)
+	'GAME_END_PING_ROLE_ID': 1441386642332979200,
+	1397641683205624009 # Role to ping when the game ends (e.g., for admins)
 
 	# Winner Roles (Key: minimum wins required, Value: Role ID) (***UPDATE THESE PLACEHOLDERS***)
 	'WINNER_ROLES_CONFIG': {
