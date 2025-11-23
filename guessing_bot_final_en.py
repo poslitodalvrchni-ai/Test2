@@ -52,7 +52,7 @@ CONFIG = {
 		1397641683205624009, 
 		1441386642332979200
 	],
-	# OPRAVENO: Nastaveno ID pro pingování nápověd na 1442182783253483650
+	# HINT_PING_ROLE_IDS: Tato role musí být v hierarchii **pod** rolí bota, aby ji mohl pingnout/spravovat.
 	'HINT_PING_ROLE_IDS': [
 		1442182783253483650 # Role to ping on every new hint (The requested ID)
 	],
@@ -559,41 +559,84 @@ async def game_status(ctx):
 @bot.command(name='testping', help='[ADMIN] Immediately tests if the bot can ping the configured Hint Role in this channel.')
 @is_authorized_admin()
 async def test_ping(ctx):
-	"""Admin command to test role ping functionality immediately."""
+	"""Admin command to test role ping functionality immediately, including checks for role existence and hierarchy."""
 	
-	# Check if this is the target hint channel ID
 	is_target_channel = ctx.channel.id == CONFIG['HINT_CHANNEL_ID']
-	
-	# Get the role objects
-	hint_roles = []
-	for role_id in CONFIG['HINT_PING_ROLE_IDS']:
-		role = ctx.guild.get_role(role_id)
-		if role:
-			hint_roles.append(role.name)
-		
 	ping_string = generate_hint_ping_string()
 	
-	# Check if ping string is empty (meaning role IDs are likely wrong or roles don't exist)
-	if not ping_string.strip():
-		await ctx.send(
-			"❌ **TEST FAILED:** No valid role IDs found in `CONFIG['HINT_PING_ROLE_IDS']`. "
-			"Please check the IDs in the configuration."
-		)
-		return
+	# Detailed check for each configured role
+	check_results = []
+	all_roles_found = True
+	
+	for role_id in CONFIG['HINT_PING_ROLE_IDS']:
+		role = ctx.guild.get_role(role_id)
+		
+		if role:
+			# Check 1: Role found
+			role_name = role.name
+			
+			# Check 2: Hierarchy (Bot's highest role must be above the target role)
+			# Find the bot's highest role
+			bot_member = ctx.guild.get_member(bot.user.id)
+			if not bot_member:
+				hierarchy_status = "⚠️ Bot member not found in guild. Cannot check hierarchy."
+			else:
+				# Get the bot's highest role (highest position)
+				bot_highest_role = bot_member.top_role
+				
+				# Check if bot's role position is higher than the target role's position
+				if bot_highest_role.position > role.position:
+					hierarchy_status = "✅ Bot's role is above target role."
+				else:
+					hierarchy_status = (
+						"❌ **HIERARCHY ERROR:** Bot's highest role "
+						f"(`{bot_highest_role.name}` at position {bot_highest_role.position}) is **NOT** above the target role "
+						f"(`{role_name}` at position {role.position}). "
+						"**You must move the bot's role higher in the server settings.**"
+					)
+			
+			check_results.append(
+				f"**Role ID: {role_id}**\n"
+				f"- Name Found: **{role_name}**\n"
+				f"- Hierarchy Check: {hierarchy_status}"
+			)
+			
+		else:
+			# Role not found (ID is wrong or bot cache is incomplete)
+			all_roles_found = False
+			check_results.append(
+				f"**Role ID: {role_id}**\n"
+				"❌ **ROLE NOT FOUND:** This ID does not correspond to an existing role in the server, or the bot cannot see it. Check the ID."
+			)
 
-	# Check if the current channel is the expected channel
+	# Summarize the findings
+	summary = "\n\n".join(check_results)
+	
+	if not all_roles_found:
+		final_status = "❌ **TEST FAILED:** One or more roles were not found."
+	elif not ping_string.strip():
+		final_status = "❌ **TEST FAILED:** The ping string is empty. Check `CONFIG['HINT_PING_ROLE_IDS']`."
+	else:
+		final_status = "✅ **PING TEST: CODE GENERATION SUCCESSFUL.**"
+
+	# Warning if not in target channel
+	channel_warning = ""
 	if not is_target_channel:
-		await ctx.send(
+		channel_warning = (
 			f"⚠️ **Warning:** This test is not running in the configured hint channel ID "
 			f"(`{CONFIG['HINT_CHANNEL_ID']}`). "
 			f"The final test will be run in the correct channel when the hint is due."
 		)
 
 	test_message = (
-		f"✅ **PING TEST: SUCCESSFUL CODE GENERATION.**\n"
-		f"Attempting to ping role(s) **{', '.join(hint_roles)}** with string: `{ping_string.strip()}`\n\n"
-		f"**EXPECTED RESULT:**\n"
-		f"{ping_string} This is a test ping. If you see the role mentioned, the ping works!"
+		f"{final_status}\n\n"
+		f"### Role Check Summary\n"
+		f"{summary}\n\n"
+		f"### Expected Ping Output\n"
+		f"Attempting to ping role(s) with string: `{ping_string.strip()}`\n\n"
+		f"**RESULT:**\n"
+		f"{ping_string} This is a test ping. If you see the role mentioned, the ping works!\n\n"
+		f"{channel_warning}"
 	)
 	
 	await ctx.send(test_message)
