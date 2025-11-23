@@ -43,9 +43,9 @@ CONFIG = {
 
     # Channel and Category IDs
     'TARGET_CATEGORY_ID': 1441691009993146490, # Main game category ID
-    'WINS_CHANNEL_ID': 1442057049805422693,     # Channel for !wins command only
+    'WINS_CHANNEL_ID': 1442057049805422693, 	# Channel for !wins command only
     'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, # Channel for announcing the winner
-    'HINT_CHANNEL_ID': 1441386236844572834,     # Channel for periodic hint announcements
+    'HINT_CHANNEL_ID': 1441386236844572834, 	# Channel for periodic hint announcements
     
     # Role IDs
     'ADMIN_ROLE_IDS': [
@@ -59,12 +59,12 @@ CONFIG = {
 
     # Winner Roles (Key: minimum wins required, Value: Role ID)
     'WINNER_ROLES_CONFIG': {
-        1:     1441693698776764486,
-        5:     1441693984266129469,
-        10:    1441694043477381150,
-        25:    1441694109268967505,
-        50:    1441694179011989534,
-        100:   1441694438345674855
+        1: 	 1441693698776764486,
+        5: 	 1441693984266129469,
+        10: 	1441694043477381150,
+        25: 	1441694109268967505,
+        50: 	1441694179011989534,
+        100: 	1441694438345674855
     }
 }
 
@@ -77,6 +77,8 @@ is_game_active = False
 hint_timing_minutes = CONFIG['DEFAULT_HINT_TIMING_MINUTES'] 
 last_hint_reveal_time = None
 user_wins = {}
+# Dictionary to track last guess time for cooldown
+last_guess_time = {} 
 
 # Set up Intents
 intents = discord.Intents.default()
@@ -103,6 +105,13 @@ def generate_hint_ping_string():
     # Diagnostic print to confirm the generated ping string
     print(f"DIAG: Generated hint ping string: '{pings.strip()}'") 
     return pings
+
+def generate_game_end_ping_string():
+    """Generates the ping string for the single game end role."""
+    role_id = CONFIG['GAME_END_PING_ROLE_ID']
+    ping = f"<@&{role_id}>"
+    print(f"DIAG: Generated game end ping string: '{ping}'")
+    return ping
 
 # --- Custom Admin Check ---
 
@@ -143,6 +152,10 @@ async def command_location_check(ctx):
             return False
     
     # Check 3: Command is in any other channel or category
+    if ctx.command.name == 'testping' and ctx.author.guild_permissions.administrator:
+        # Allow testping for administrators anywhere for diagnostic purposes
+        return True
+    
     await ctx.send(f"❌ This command can only be used in the designated game category.", delete_after=10)
     return False
 
@@ -181,7 +194,7 @@ def save_game_state():
     state = {
         'is_game_active': is_game_active,
         'correct_answer': correct_answer,
-        # Convert keys of current_hints_storage to strings for JSON
+        # Convert keys of current_hints_storage (int) to strings for JSON
         'current_hints_storage': {str(k): v for k, v in current_hints_storage.items()},
         'current_hints_revealed': current_hints_revealed,
         # Convert datetime object to ISO 8601 string for persistence
@@ -208,7 +221,7 @@ def load_game_state():
                 
                 is_game_active = state.get('is_game_active', False)
                 correct_answer = state.get('correct_answer')
-                # Convert keys of current_hints_storage back to integers
+                # Convert keys of current_hints_storage (string) back to integers
                 current_hints_storage = {int(k): v for k, v in state.get('current_hints_storage', {}).items()}
                 current_hints_revealed = state.get('current_hints_revealed', [])
                 hint_timing_minutes = state.get('hint_timing_minutes', CONFIG['DEFAULT_HINT_TIMING_MINUTES'])
@@ -234,7 +247,8 @@ def load_game_state():
 async def hint_timer():
     global current_hints_revealed, last_hint_reveal_time, current_hints_storage, hint_timing_minutes
     
-    if not is_game_active or not last_hint_reveal_time or not current_hints_storage:
+    # Check if the bot is ready and game is active
+    if not bot.is_ready() or not is_game_active or not last_hint_reveal_time or not current_hints_storage:
         return
         
     now = datetime.now()
@@ -256,7 +270,10 @@ async def hint_timer():
                     ping_string = generate_hint_ping_string()
                     
                     # Construct the message including the role pings
-                    ping_message = f"{ping_string}📢 **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
+                    ping_message = (
+                        f"{ping_string}📢 **New Hint ({next_hint_number}/{REQUIRED_HINTS}):** "
+                        f"_{hint_text}_"
+                    )
 
                     await channel.send(ping_message)
                     
@@ -271,6 +288,7 @@ async def hint_timer():
                 # All hints revealed, stop the timer
                 if hint_timer.is_running():
                     hint_timer.stop()
+                    print("Hint timer stopped: All hints revealed.")
                     
     except Exception as e:
         # Log the error but allow the loop to continue next minute
@@ -289,8 +307,11 @@ async def on_ready():
     else:
         await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
         
+    # CRITICAL FIX: Ensure timer starts on ready based on the loaded state
     if not hint_timer.is_running():
         hint_timer.start()
+        print("Hint timer started/restarted on bot startup.")
+
 
 # --- Utility Functions ---
 async def award_winner_roles(member: discord.Member):
@@ -300,16 +321,15 @@ async def award_winner_roles(member: discord.Member):
     guild = member.guild
     WINNER_ROLES_CONFIG = CONFIG['WINNER_ROLES_CONFIG']
     
+    # 1. Update and save win count
     user_wins[user_id] = user_wins.get(user_id, 0) + 1
     wins_count = user_wins[user_id]
     save_user_wins()
 
-    await member.send(f"Congratulations! You now have {wins_count} wins!")
-
+    # 2. Find the highest tier role the user qualifies for
     achieved_role_id = None
     sorted_wins_levels = sorted(WINNER_ROLES_CONFIG.keys(), reverse=True)
     
-    # Find the highest tier role the user now qualifies for
     for level in sorted_wins_levels:
         if wins_count >= level:
             achieved_role_id = WINNER_ROLES_CONFIG[level]
@@ -324,7 +344,7 @@ async def award_winner_roles(member: discord.Member):
 
         all_winner_role_ids = list(WINNER_ROLES_CONFIG.values())
         
-        # Identify lower-tier roles to remove
+        # Identify lower-tier roles to remove (only those from the WINNER_ROLES_CONFIG)
         roles_to_remove = [
             role for role in member.roles 
             if role.id in all_winner_role_ids and role.id != achieved_role_id
@@ -492,12 +512,12 @@ async def game_status(ctx):
     
     # Next Hint Time
     next_hint_time_str = "N/A"
+    next_hint_time_str_detail = ""
     if is_game_active and last_hint_reveal_time:
         next_reveal = last_hint_reveal_time + timedelta(minutes=hint_timing_minutes)
         time_until_next = next_reveal - datetime.now()
         
         if time_until_next.total_seconds() > 0:
-            # Added a small safety check in case the calculation is slightly negative
             seconds = int(time_until_next.total_seconds())
             next_hint_time_str = f"In {format_time_remaining(seconds)}"
             next_hint_time_str_detail = f"Expected at: {next_reveal.strftime('%H:%M:%S %Z')}"
@@ -524,7 +544,7 @@ async def game_status(ctx):
     
     # Timer Details (only if a game is/was active)
     timer_details = (
-        f"**Revealed:** {revealed_text}\n"
+        f"**Revealed:** {revealed_count} of {REQUIRED_HINTS}\n"
         f"**Last Reveal:** {last_hint_reveal_time.strftime('%H:%M:%S %Z') if last_hint_reveal_time else 'N/A'}\n"
         f"**Next Reveal:** {next_hint_time_str}\n"
         f"{next_hint_time_str_detail if is_game_active and last_hint_reveal_time else ''}"
@@ -532,6 +552,49 @@ async def game_status(ctx):
     embed.add_field(name="Hint Timer", value=timer_details, inline=True)
 
     await ctx.send(embed=embed)
+
+
+@bot.command(name='testping', help='[ADMIN] Immediately tests if the bot can ping the configured Hint Role in this channel.')
+@is_authorized_admin()
+async def test_ping(ctx):
+    """Admin command to test role ping functionality immediately."""
+    
+    # Check if this is the target hint channel ID
+    is_target_channel = ctx.channel.id == CONFIG['HINT_CHANNEL_ID']
+    
+    # Get the role objects
+    hint_roles = []
+    for role_id in CONFIG['HINT_PING_ROLE_IDS']:
+        role = ctx.guild.get_role(role_id)
+        if role:
+            hint_roles.append(role.name)
+        
+    ping_string = generate_hint_ping_string()
+    
+    # Check if ping string is empty (meaning role IDs are likely wrong or roles don't exist)
+    if not ping_string.strip():
+        await ctx.send(
+            "❌ **TEST FAILED:** No valid role IDs found in `CONFIG['HINT_PING_ROLE_IDS']`. "
+            "Please check the IDs in the configuration."
+        )
+        return
+
+    # Check if the current channel is the expected channel
+    if not is_target_channel:
+        await ctx.send(
+            f"⚠️ **Warning:** This test is not running in the configured hint channel ID "
+            f"(`{CONFIG['HINT_CHANNEL_ID']}`). "
+            f"The final test will be run in the correct channel when the hint is due."
+        )
+
+    test_message = (
+        f"✅ **PING TEST: SUCCESSFUL CODE GENERATION.**\n"
+        f"Attempting to ping role(s) **{', '.join(hint_roles)}** with string: `{ping_string.strip()}`\n\n"
+        f"**EXPECTED RESULT:**\n"
+        f"{ping_string} This is a test ping. If you see the role mentioned, the ping works!"
+    )
+    
+    await ctx.send(test_message)
 
 
 # --- Game Commands ---
@@ -555,20 +618,23 @@ async def start_game(ctx):
     first_hint_text = current_hints_storage[1]
     last_hint_reveal_time = datetime.now()
     
-    # Save the active state and first hint details
-    save_game_state() # Save active state immediately
+    # CRITICAL FIX: Ensure the timer is running when starting a new game.
+    if not hint_timer.is_running():
+        hint_timer.start()
+        print("Hint timer restarted via !start command.")
 
     # Go to the dedicated channel for hints
     announcement_channel = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
 
     if not announcement_channel:
         is_game_active = False # Cancel game start
-        await ctx.send("❌ Error: The automatic hint channel was not found. Please check the ID.")
+        await ctx.send("❌ Error: The automatic hint channel was not found. Please ask an admin to check the configuration ID.")
+        save_game_state() # Save inactive state
         return
 
-    # Store the first revealed hint
+    # Store the first revealed hint and save state
     current_hints_revealed.append({'hint_number': 1, 'text': first_hint_text})
-    save_game_state() # Save state after storing first hint
+    save_game_state() 
 
     print(f"New game started, item is {correct_answer}")
     await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
@@ -578,7 +644,7 @@ async def start_game(ctx):
 
     start_message = (
         f'{ping_string}📢 **A new item guessing game has started!** Hints will be revealed every **{hint_timing_minutes} minutes**.'
-        f'\n\n**First Hint (1/{REQUIRED_HINTS}):** {first_hint_text}'
+        f'\n\n**First Hint (1/{REQUIRED_HINTS}):** _{first_hint_text}_'
         f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per hour limit.)'
     )
     
@@ -588,8 +654,6 @@ async def start_game(ctx):
     # Acknowledge the start to the admin/caller
     await ctx.send(f"✅ The game has started! The first hint has been sent to {announcement_channel.mention}.")
 
-# Dictionary to track last guess time for cooldown
-last_guess_time = {} 
 
 @bot.command(name='guess', help='Attempts to guess the item name.')
 async def guess_item(ctx, *, guess: str):
@@ -643,7 +707,7 @@ async def guess_item(ctx, *, guess: str):
         
         if hint_timer.is_running():
             hint_timer.stop()
-        
+            
         await award_winner_roles(ctx.author)
 
         # Reset game variables
@@ -655,65 +719,84 @@ async def guess_item(ctx, *, guess: str):
         save_game_state() # Save cleared state after a win
         
         # Ping the game end role (for admins to set up the next game)
-        game_end_ping_string = f"<@&{CONFIG['GAME_END_PING_ROLE_ID']}>"
+        game_end_ping_string = generate_game_end_ping_string()
         await ctx.send(f"{game_end_ping_string} ✅ The game has ended and an admin can set up the next round using `!setitem`.")
 
     else:
-        # Show cooldown time in the message
+        # Show cooldown time in the message (cooldown_minutes is the duration they must wait from now)
         cooldown_display = format_time_remaining(CONFIG['GUESS_COOLDOWN_MINUTES'] * 60)
         await ctx.send(f"❌ Wrong! **{ctx.author.display_name}**, that's not it. You can guess again in {cooldown_display}.")
 
-# --- Leaderboard Command ---
 
-@bot.command(name='wins', aliases=['lbc', 'top'], help='Displays the top 10 winners.')
-async def show_leaderboard(ctx):
-    """Displays the winners leaderboard and shows user's own win count."""
+@bot.command(name='current', help='Displays the hints revealed so far.')
+async def show_current_hints(ctx):
+    """Displays the hints revealed so far, or the game status if no hints are out."""
+    global is_game_active, current_hints_revealed
+
+    if not is_game_active:
+        await ctx.send("No game is currently active. Use `!start` to begin a new round.")
+        return
     
-    user_id = ctx.author.id
-    user_wins_count = user_wins.get(user_id, 0)
-
-    if not user_wins:
-        await ctx.send(f"No one has won yet! Be the first to guess. (Your wins: 0)")
+    if not current_hints_revealed:
+        await ctx.send("The game has started, but no hints have been revealed yet (waiting for the first hint to be posted).")
         return
 
-    # Sort the wins data by count, descending
-    sorted_winners = sorted(user_wins.items(), key=lambda item: item[1], reverse=True)
+    REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
     
-    leaderboard_embed = discord.Embed(
-        title="🏆 Item Guessing Leaderboard",
-        description=f"Top 10 users with the most guessed items.\n\n**Your total wins:** {user_wins_count}",
-        color=discord.Color.gold()
+    embed = discord.Embed(
+        title=f"🔎 Current Game Hints ({len(current_hints_revealed)}/{REQUIRED_HINTS})",
+        color=discord.Color.teal()
     )
     
-    rank = 1
-    for user_id, wins in sorted_winners[:10]:
-        member = ctx.guild.get_member(user_id)
-        # Fallback in case the member object is not found (due to cache/leaving guild)
-        member_name = member.display_name if member else f"Unknown User ({user_id})"
+    for hint in current_hints_revealed:
+        embed.add_field(name=f"Hint {hint['hint_number']}", value=f"_{hint['text']}_", inline=False)
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='nexthint', help='Shows the time remaining until the next hint is revealed.')
+async def show_next_hint_time(ctx):
+    """Shows the time remaining until the next hint is revealed."""
+    global is_game_active, last_hint_reveal_time, hint_timing_minutes, current_hints_revealed, current_hints_storage
+
+    if not is_game_active:
+        return await ctx.send("The guessing game is currently inactive. Use `!start` to begin a new round.")
+
+    # Check if all hints have been revealed (and the timer should be stopped)
+    if len(current_hints_revealed) == CONFIG['REQUIRED_HINTS'] or len(current_hints_revealed) == len(current_hints_storage):
+        return await ctx.send("All hints have already been revealed for the current item! Time to guess!")
+    
+    if not last_hint_reveal_time:
+        return await ctx.send("Game is active, but the hint timer hasn't officially started (usually fixed by `!start`).")
+
+    # Calculate the next reveal time
+    next_reveal = last_hint_reveal_time + timedelta(minutes=hint_timing_minutes)
+    time_until_next = next_reveal - datetime.now()
+    seconds = int(time_until_next.total_seconds())
+    
+    if seconds <= 0:
+        # Time has passed, but the hint_timer loop hasn't run yet.
+        await ctx.send("⏳ The next hint is due now and will be revealed momentarily (waiting for the minute-long timer loop to execute).")
+    else:
+        time_remaining_str = format_time_remaining(seconds)
+        next_hint_number = len(current_hints_revealed) + 1
         
-        leaderboard_embed.add_field(
-            name=f"#{rank}. {member_name}",
-            value=f"**{wins}** wins",
-            inline=False
+        await ctx.send(
+            f"⏱️ **Next Hint ({next_hint_number}/{CONFIG['REQUIRED_HINTS']})** will be revealed in **{time_remaining_str}** "
+            f"(at approximately {next_reveal.strftime('%H:%M %Z')})."
         )
-        rank += 1
-
-    await ctx.send(embed=leaderboard_embed)
-
-# --- BOT STARTUP ---
-if TOKEN:
-    # 1. Start the Flask server in a separate thread (KEEP-ALIVE)
+# --- Bot Run Block ---
+if __name__ == '__main__':
+    # Start the Flask Keep-Alive server in a background thread
+    t = threading.Thread(target=run_flask_app)
+    t.daemon = True # Daemon thread exits when the main thread (bot) exits
+    t.start()
+    
+    # Start the Discord bot
+    # Note: bot.run() is blocking and must be the last line in the main thread.
     try:
-        flask_thread = threading.Thread(target=run_flask_app, daemon=True)
-        flask_thread.start()
-        print(f"Flask server started on port: {WEB_PORT}")
+        bot.run(TOKEN)
     except Exception as e:
-        print(f"ERROR: Could not start Flask thread: {e}")
-        
-    # 2. Start the Discord bot in the main thread
-    try:
-        bot.run(TOKEN, reconnect=True)
-    except Exception as e:
-        print(f"Error running the bot: {e}")
-else:
-    print("ERROR: Discord token not found in environment variables. Cannot start bot.")
+        print(f"FATAL ERROR: Bot failed to run: {e}", file=sys.stderr)
+        # Attempt to clean up and exit if the bot fails to run
+        sys.exit(1)
