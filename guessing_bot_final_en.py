@@ -38,6 +38,8 @@ TARGET_CATEGORY_ID = 1441691009993146490
 WINS_CHANNEL_ID = 1442057049805422693 
 # ID kanálu pro hlášení vítěze
 WINNER_ANNOUNCEMENT_CHANNEL_ID = 1441858034291708059
+# ID KANÁLU PRO AUTOMATICKÉ ODESÍLÁNÍ NÁPOVĚD
+HINT_ANNOUNCEMENT_CHANNEL_ID_PERIODIC = 1441386236844572834 
 ADMIN_ROLE_IDS = [
     1397641683205624009, 
     1441386642332979200
@@ -156,8 +158,8 @@ async def hint_timer():
         next_hint_number = len(current_hints_revealed) + 1
         
         if next_hint_number in current_hints_storage:
-            # We get the channel ID from the first revealed hint in the list
-            channel = bot.get_channel(current_hints_revealed[0]['channel_id'])
+            # POUŽIJEME DEDIKOVANÝ KANÁL PRO AUTOMATICKÉ NÁPOVĚDY
+            channel = bot.get_channel(HINT_ANNOUNCEMENT_CHANNEL_ID_PERIODIC)
             
             if channel:
                 hint_text = current_hints_storage[next_hint_number]
@@ -170,7 +172,8 @@ async def hint_timer():
 
                 await channel.send(ping_message)
                 
-                current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text, 'channel_id': channel.id})
+                # Uložíme pouze číslo a text, ID kanálu už nepotřebujeme
+                current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text}) 
                 last_hint_reveal_time = now
         
         else:
@@ -267,11 +270,16 @@ async def set_hint(ctx, number: int, *, hint_text: str):
         return
 
     current_hints_storage[number] = hint_text.strip()
-    await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set.")
     
-    # Změněno z 5 na REQUIRED_HINTS (7)
-    if correct_answer and len(current_hints_storage) == REQUIRED_HINTS: 
-        await bot.change_presence(activity=discord.Game(name=f"Ready! (!start)"))
+    current_count = len(current_hints_storage)
+    
+    # Oznámí aktuální počet nastavených nápověd
+    if current_count == REQUIRED_HINTS:
+        await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. **Všech {REQUIRED_HINTS} nápověd je nyní nakonfigurováno!**")
+        if correct_answer:
+            await bot.change_presence(activity=discord.Game(name=f"Ready! (!start)"))
+    else:
+        await ctx.send(f"✅ Hint No. **{number}/{REQUIRED_HINTS}** has been set. Aktuálně nakonfigurovaných nápověd: **{current_count}/{REQUIRED_HINTS}**.")
 
 
 @bot.command(name='sethinttiming', help='[ADMIN] Sets the interval for revealing hints (in minutes).')
@@ -331,8 +339,16 @@ async def start_game(ctx):
     first_hint_text = current_hints_storage[1]
     last_hint_reveal_time = datetime.now()
     
-    # Store the channel ID where the game started for hint sending
-    current_hints_revealed.append({'hint_number': 1, 'text': first_hint_text, 'channel_id': ctx.channel.id})
+    # Přesunuto na dedikovaný kanál pro nápovědy
+    announcement_channel = bot.get_channel(HINT_ANNOUNCEMENT_CHANNEL_ID_PERIODIC)
+
+    if not announcement_channel:
+        is_game_active = False # Zrušit spuštění hry
+        await ctx.send("❌ Chyba: Kanál pro automatické nápovědy nebyl nalezen. Zkontrolujte ID.")
+        return
+
+    # Store the first revealed hint (only number and text, channel ID is no longer needed in the list)
+    current_hints_revealed.append({'hint_number': 1, 'text': first_hint_text})
 
     print(f"New game started, item is {correct_answer}")
     await bot.change_presence(activity=discord.Game(name=f"Guess the item! (!guess)"))
@@ -343,7 +359,12 @@ async def start_game(ctx):
         f'\n\n**First Hint (1/{REQUIRED_HINTS}):** {first_hint_text}'
         f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per hour limit.)'
     )
-    await ctx.send(start_message)
+    
+    # Odeslání první nápovědy do dedikovaného kanálu
+    await announcement_channel.send(start_message)
+
+    # Oznámení pro admina/volajícího, že hra byla spuštěna a kam nápověda šla
+    await ctx.send(f"✅ Hra byla spuštěna! První nápověda byla odeslána do kanálu {announcement_channel.mention}.")
 
 # Dictionary to track last guess time for cooldown
 last_guess_time = {} 
