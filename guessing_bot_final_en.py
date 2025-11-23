@@ -29,7 +29,7 @@ def run_flask_app():
 # --- BOT CONFIGURATION AND CONSTANTS ---
 # TOKEN is read via os.getenv('DISCORD_TOKEN') below
 
-# Centralized Configuration Dictionary - MAKE SURE TO UPDATE THESE IDs
+# Centralized Configuration Dictionary - IDs updated with user-provided labels
 CONFIG = {
 	# File Persistence
 	'DATA_FILE': 'user_wins.json',
@@ -47,19 +47,20 @@ CONFIG = {
 	'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, # Channel for announcing the winner
 	'HINT_CHANNEL_ID': 1441386236844572834, 	# Channel for periodic hint announcements
 	
-	# Role IDs (***UPDATE THESE PLACEHOLDERS***)
+	# Role IDs (UPDATED/CONFIRMED BASED ON USER REQUEST)
 	'ADMIN_ROLE_IDS': [
-		1397641683205624009, 
-		1441386642332979200
+		1397641683205624009, # Admin: Support Team
+		1441386642332979200  # Admin: Host
 	],
-	# HINT_PING_ROLE_IDS: Tato role musí být v hierarchii **pod** rolí bota, aby ji mohl pingnout/spravovat.
+	# Role to ping on every new hint reveal
 	'HINT_PING_ROLE_IDS': [
-		1442182783253483650 # Role to ping on every new hint (The requested ID)
+		1441388270201077882 # Ping Role
 	],
-	# FIX: This line was causing a SyntaxError. We use only one ID now.
-	'GAME_END_PING_ROLE_ID': 1441386642332979200, 
+	# Role to ping when the game ends (signals an admin to set up a new game)
+	'GAME_END_PING_ROLE_ID': 1441386642332979200, # Host role (FIXED to user's request)
 
-	# Winner Roles (Key: minimum wins required, Value: Role ID) (***UPDATE THESE PLACEHOLDERS***)
+	# Winner Roles (Key: minimum wins required, Value: Role ID) 
+    # (These IDs must be updated by the user for their server roles)
 	'WINNER_ROLES_CONFIG': {
 		1: 	 1441693698776764486,
 		5: 	 1441693984266129469,
@@ -158,7 +159,7 @@ async def command_location_check(ctx):
 		# Allow testping for administrators anywhere for diagnostic purposes
 		return True
 	
-	await ctx.send(f"❌ This command can only be used in the designated game category.", delete_after=10)
+	await ctx.send(f"❌ This command can only be used in the designated game category or wins channel.", delete_after=10)
 	return False
 
 # --- Data Persistence Functions (User Wins) ---
@@ -522,7 +523,8 @@ async def game_status(ctx):
 		if time_until_next.total_seconds() > 0:
 			seconds = int(time_until_next.total_seconds())
 			next_hint_time_str = f"In {format_time_remaining(seconds)}"
-			next_hint_time_str_detail = f"Expected at: {next_reveal.strftime('%H:%M:%S %Z')}"
+			# Use UTC/server time for consistent display
+			next_hint_time_str_detail = f"Expected at: {next_reveal.strftime('%H:%M:%S UTC')}" 
 		else:
 			next_hint_time_str = "⏳ Due now"
 			next_hint_time_str_detail = "Waiting for next minute loop."
@@ -547,7 +549,7 @@ async def game_status(ctx):
 	# Timer Details (only if a game is/was active)
 	timer_details = (
 		f"**Revealed:** {revealed_count} of {REQUIRED_HINTS}\n"
-		f"**Last Reveal:** {last_hint_reveal_time.strftime('%H:%M:%S %Z') if last_hint_reveal_time else 'N/A'}\n"
+		f"**Last Reveal:** {last_hint_reveal_time.strftime('%H:%M:%S UTC') if last_hint_reveal_time else 'N/A'}\n"
 		f"**Next Reveal:** {next_hint_time_str}\n"
 		f"{next_hint_time_str_detail if is_game_active and last_hint_reveal_time else ''}"
 	)
@@ -625,7 +627,7 @@ async def test_ping(ctx):
 		channel_warning = (
 			f"⚠️ **Warning:** This test is not running in the configured hint channel ID "
 			f"(`{CONFIG['HINT_CHANNEL_ID']}`). "
-			f"The final test will be run in the correct channel when the hint is due."
+			f"The final ping will occur in the correct channel when the hint is due."
 		)
 
 	test_message = (
@@ -634,7 +636,7 @@ async def test_ping(ctx):
 		f"{summary}\n\n"
 		f"### Expected Ping Output\n"
 		f"Attempting to ping role(s) with string: `{ping_string.strip()}`\n\n"
-		f"**RESULT:**\n"
+		f"**RESULT (If Ping is Active):**\n"
 		f"{ping_string} This is a test ping. If you see the role mentioned, the ping works!\n\n"
 		f"{channel_warning}"
 	)
@@ -643,11 +645,13 @@ async def test_ping(ctx):
 
 
 # --- Game Commands ---
-@bot.command(name='start', help='Starts a new game with the configured item.')
+@bot.command(name='start', help='[ADMIN] Starts a new game with the configured item.')
+@is_authorized_admin()
 async def start_game(ctx):
 	global correct_answer, is_game_active, current_hints_revealed, last_hint_reveal_time
 	
 	REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
+	COOLDOWN_MINUTES = CONFIG['GUESS_COOLDOWN_MINUTES']
 
 	if is_game_active:
 		await ctx.send("A game is already running! Try guessing with `!guess <item>`.")
@@ -690,7 +694,7 @@ async def start_game(ctx):
 	start_message = (
 		f'{ping_string}📢 **A new item guessing game has started!** Hints will be revealed every **{hint_timing_minutes} minutes**.'
 		f'\n\n**First Hint (1/{REQUIRED_HINTS}):** _{first_hint_text}_'
-		f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per hour limit.)'
+		f'\n\nStart guessing with `!guess <item name>`! (Remember the one guess per {COOLDOWN_MINUTES} minute cooldown.)' # Updated cooldown time
 	)
 	
 	# Send the first hint to the dedicated channel
@@ -828,7 +832,7 @@ async def show_next_hint_time(ctx):
 		
 		await ctx.send(
 			f"⏱️ **Next Hint ({next_hint_number}/{CONFIG['REQUIRED_HINTS']})** will be revealed in **{time_remaining_str}** "
-			f"(at approximately {next_reveal.strftime('%H:%M %Z')})."
+			f"(at approximately {next_reveal.strftime('%H:%M UTC')})."
 		)
 
 @bot.command(name='wins', aliases=['lbc', 'top'], help='Displays the top 10 winners.')
@@ -872,32 +876,26 @@ async def show_leaderboard(ctx):
 		
 	# 3. Create the Embed
 	embed = discord.Embed(
-		title="👑 Item Guessing Leaderboard - Top 10",
+		title="🏆 Item Guessing Leaderboard - Top 10",
 		description="\n".join(leaderboard_entries),
 		color=discord.Color.gold()
 	)
 	embed.set_footer(text="Keep guessing to climb the ranks!")
-
+	
 	await ctx.send(embed=embed)
 
 
-# --- Bot Run Block ---
+# --- Bot Initialization ---
+
 if __name__ == '__main__':
-	# Start the Flask Keep-Alive server in a background thread
-	t = threading.Thread(target=run_flask_app, daemon=True)
+	# Start the Flask web server in a separate thread
+	t = threading.Thread(target=run_flask_app)
 	t.start()
 	
-	# Read the token from the environment variable
-	TOKEN = os.getenv('DISCORD_TOKEN')
-
-	# Run the Discord Bot
-	if TOKEN:
-		try:
-			# discord.run() is synchronous and blocking
-			bot.run(TOKEN)
-		except discord.LoginFailure:
-			print("ERROR: Invalid DISCORD_TOKEN provided. Please check the environment variable.")
-		except Exception as e:
-			print(f"An unexpected error occurred during bot execution: {e}")
-	else:
-		print("ERROR: DISCORD_TOKEN environment variable is not set. Cannot run the bot.")
+	# Start the Discord bot
+	DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+	if not DISCORD_TOKEN:
+		print("ERROR: DISCORD_TOKEN environment variable not set.")
+		sys.exit(1)
+		
+	bot.run(DISCORD_TOKEN)
