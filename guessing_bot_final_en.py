@@ -36,12 +36,18 @@ DATA_FILE = 'user_wins.json'
 TARGET_CATEGORY_ID = 1441691009993146490 
 # ID kanálu pro žebříček, kde funguje jen !wins
 WINS_CHANNEL_ID = 1442057049805422693 
+# ID kanálu pro hlášení vítěze
+WINNER_ANNOUNCEMENT_CHANNEL_ID = 1441858034291708059
 ADMIN_ROLE_IDS = [
     1397641683205624009, 
     1441386642332979200
 ]
-# ID role, která má být pingnuta při každé nové nápovědě
-HINT_PING_ROLE_ID = 1441388270201077882
+# Seznam ID rolí, které mají být pingnuty při každé nové nápovědě
+HINT_PING_ROLE_IDS = [
+    1442080434073895022  # Jediná správná role pro nové nápovědy
+]
+# ID role, která má být pingnuta po skončení hry
+GAME_END_PING_ROLE_ID = 1442080784570646629 
 
 # Set up Intents
 intents = discord.Intents.default()
@@ -155,8 +161,12 @@ async def hint_timer():
             
             if channel:
                 hint_text = current_hints_storage[next_hint_number]
-                # Sestavíme zprávu, která obsahuje ping na roli
-                ping_message = f"<@&{HINT_PING_ROLE_ID}> 📢 **Nová Nápověda ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
+                
+                # Vytvoření pingovacího řetězce pro všechny definované role
+                ping_string = "".join([f"<@&{role_id}> " for role_id in HINT_PING_ROLE_IDS])
+                
+                # Sestavíme zprávu, která obsahuje ping na role
+                ping_message = f"{ping_string}📢 **Nová Nápověda ({next_hint_number}/{REQUIRED_HINTS}):** {hint_text}"
 
                 await channel.send(ping_message)
                 
@@ -373,7 +383,15 @@ async def guess_item(ctx, *, guess: str):
     
     # Check the guess (case-insensitive)
     if guess.strip().lower() == correct_answer.lower():
+        # 1. Oznámení ve stávajícím kanále
         await ctx.send(f"🎉 **Congratulations, {ctx.author.display_name}!** You guessed the item: **{correct_answer}**! The game is over!")
+
+        # 2. Oznámení v dedikovaném kanále s pingem
+        announcement_channel = bot.get_channel(WINNER_ANNOUNCEMENT_CHANNEL_ID)
+        if announcement_channel:
+            winner_ping = ctx.author.mention
+            message = f"🏆 **VÍTĚZ KOLA!** {winner_ping} právě uhodl předmět. Správná odpověď byla: **{correct_answer}**!"
+            await announcement_channel.send(message)
         
         if hint_timer.is_running():
             hint_timer.stop()
@@ -384,8 +402,11 @@ async def guess_item(ctx, *, guess: str):
         correct_answer = None # Clear item for next round
         current_hints_revealed = []
         current_hints_storage = {}
+        
+        # Ping role při konci hry (adminům pro nastavení další hry)
+        game_end_ping_string = f"<@&{GAME_END_PING_ROLE_ID}>"
+        await ctx.send(f"{game_end_ping_string} ✅ Hra skončila a správce může nastavit další kolo pomocí `!setitem`.")
 
-        await ctx.send("Admin can now set up the next round with `!setitem`.")
     else:
         await ctx.send(f"❌ Wrong! **{ctx.author.display_name}**, that's not it. You can guess again in 60 minutes.")
 
