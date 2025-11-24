@@ -18,14 +18,6 @@ def home():
 	"""Simple Health Check endpoint required by Render for Web Services."""
 	return "Item Guessing Bot Worker is Running! (Keep-Alive Active)", 200
 
-def run_flask_app():
-	"""Starts Flask on a separate thread to listen for web requests (Keep-Alive)."""
-	try:
-		# Use 0.0.0.0 to listen on all interfaces
-		app.run(host='0.0.0.0', port=WEB_PORT, debug=False)
-	except Exception as e:
-		print(f"Error starting Flask server: {e}", file=sys.stderr)
-
 # --- BOT CONFIGURATION AND CONSTANTS ---
 # TOKEN is read via os.getenv('DISCORD_TOKEN') below
 
@@ -59,8 +51,8 @@ CONFIG = {
 	# Role to ping when the game ends (signals an admin to set up a new game)
 	'GAME_END_PING_ROLE_ID': 1441386642332979200, # Host role (FIXED to user's request)
 
-	# Winner Roles (Key: minimum wins required, Value: Role ID) 
-    # (These IDs must be updated by the user for their server roles)
+	# Winner Roles (Key: minimum wins required, Value: Role ID)
+	# (These IDs must be updated by the user for their server roles)
 	'WINNER_ROLES_CONFIG': {
 		1: 	 1441693698776764486,
 		5: 	 1441693984266129469,
@@ -964,9 +956,19 @@ async def show_leaderboard(ctx):
 
 # --- STARTUP LOGIC ---
 
-# Start the Flask server in a separate thread for keep-alive functionality
-flask_thread = threading.Thread(target=run_flask_app, daemon=True)
-flask_thread.start()
+def run_discord_bot():
+	"""Runs the Discord bot on a separate thread."""
+	global DISCORD_TOKEN
+	try:
+		bot.run(DISCORD_TOKEN)
+	except discord.HTTPException as e:
+		if e.status == 429:
+			print("Rate Limit error. The bot is sending too many requests. Please check logs.")
+		else:
+			print(f"An unexpected Discord HTTP error occurred: {e}", file=sys.stderr)
+	except Exception as e:
+		print(f"An error occurred during bot execution: {e}", file=sys.stderr)
+
 
 # Get the bot token from environment variables
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -976,13 +978,16 @@ if not DISCORD_TOKEN:
     print("FATAL ERROR: DISCORD_TOKEN environment variable is not set.", file=sys.stderr)
     sys.exit(1)
 
-# Run the bot
+# Start the Discord bot on a background thread
+print("Starting Discord bot on background thread...")
+bot_thread = threading.Thread(target=run_discord_bot, daemon=True)
+bot_thread.start()
+
+# Run the Flask server on the main thread (this is the blocking call)
+# This fixes the Render "No open ports detected" issue.
+print(f"Starting Flask server on main thread on port {WEB_PORT}...")
 try:
-    bot.run(DISCORD_TOKEN)
-except discord.HTTPException as e:
-    if e.status == 429:
-        print("Rate Limit error. The bot is sending too many requests. Please check logs.")
-    else:
-        print(f"An unexpected Discord HTTP error occurred: {e}", file=sys.stderr)
+	app.run(host='0.0.0.0', port=WEB_PORT, debug=False)
 except Exception as e:
-    print(f"An error occurred during bot execution: {e}", file=sys.stderr)
+	print(f"FATAL ERROR: Could not start Flask server on main thread: {e}", file=sys.stderr)
+	sys.exit(1)
