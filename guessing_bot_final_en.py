@@ -42,7 +42,7 @@ CONFIG = {
 	# Role IDs (UPDATED/CONFIRMED BASED ON USER REQUEST)
 	'ADMIN_ROLE_IDS': [
 		1397641683205624009, # Admin: Support Team
-		1441386642332979200  # Admin: Host
+		1441386642332979200 # Admin: Host <-- FIXED: Removed U+00A0 non-breaking space
 	],
 	# Role to ping on every new hint reveal
 	'HINT_PING_ROLE_IDS': [
