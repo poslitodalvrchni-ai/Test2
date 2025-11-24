@@ -50,7 +50,7 @@ CONFIG = {
 	# Role IDs (UPDATED/CONFIRMED BASED ON USER REQUEST)
 	'ADMIN_ROLE_IDS': [
 		1397641683205624009, # Admin: Support Team
-		1441386642332979200  # Admin: Host
+		1441386642332979200  # Admin: Host
 	],
 	# Role to ping on every new hint reveal
 	'HINT_PING_ROLE_IDS': [
@@ -59,8 +59,8 @@ CONFIG = {
 	# Role to ping when the game ends (signals an admin to set up a new game)
 	'GAME_END_PING_ROLE_ID': 1441386642332979200, # Host role (FIXED to user's request)
 
-	# Winner Roles (Key: minimum wins required, Value: Role ID) 
-    # (These IDs must be updated by the user for their server roles)
+	# Winner Roles (Key: minimum wins required, Value: Role ID) 
+    # (These IDs must be updated by the user for their server roles)
 	'WINNER_ROLES_CONFIG': {
 		1: 	 1441693698776764486,
 		5: 	 1441693984266129469,
@@ -147,11 +147,11 @@ async def command_location_check(ctx):
 
 	# Check 2: Command is in the specific leaderboard channel (!wins allowed, others blocked)
 	if ctx.channel.id == CONFIG['WINS_CHANNEL_ID']:
-		if ctx.command.name in ['wins', 'lbc', 'top']:
-			return True # !wins is allowed
+		if ctx.command.name in ['wins', 'lbc', 'top', 'mywins']: # Added 'mywins' to the allowed list
+			return True # !wins and !mywins are allowed
 		else:
 			# Block all other commands (!guess, !start, etc.)
-			await ctx.send("This channel is dedicated only to the leaderboard (`!wins`). Guessing and game control must take place in the main game category.", delete_after=10)
+			await ctx.send("This channel is dedicated only to the leaderboard (`!wins`, `!mywins`). Guessing and game control must take place in the main game category.", delete_after=10)
 			return False
 	
 	# Check 3: Command is in any other channel or category
@@ -468,6 +468,47 @@ async def set_hint_timing(ctx, minutes: int):
 	hint_timing_minutes = minutes
 	save_game_state() # Save state after setting timing
 	await ctx.send(f"✅ Hint revealing interval set to **{minutes} minutes**.")
+
+
+@bot.command(name='revealhint', help='[ADMIN] Immediately reveals the next sequential hint.')
+@is_authorized_admin()
+async def reveal_hint_manual(ctx):
+	global current_hints_revealed, last_hint_reveal_time, current_hints_storage
+
+	REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
+
+	if not is_game_active:
+		return await ctx.send("❌ Cannot reveal a hint: No game is currently active.")
+	
+	next_hint_number = len(current_hints_revealed) + 1
+
+	if next_hint_number > REQUIRED_HINTS:
+		return await ctx.send(f"❌ All **{REQUIRED_HINTS}** hints have already been revealed.")
+
+	if next_hint_number in current_hints_storage:
+		channel = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
+		
+		if channel:
+			hint_text = current_hints_storage[next_hint_number]
+			ping_string = generate_hint_ping_string()
+			
+			ping_message = (
+				f"{ping_string}📢 **Manual Hint Reveal ({next_hint_number}/{REQUIRED_HINTS}):** "
+				f"_{hint_text}_"
+			)
+
+			await channel.send(ping_message)
+			
+			# Update game state
+			current_hints_revealed.append({'hint_number': next_hint_number, 'text': hint_text}) 
+			last_hint_reveal_time = datetime.now() # Reset the timer after a manual reveal
+			save_game_state()
+			
+			await ctx.send(f"✅ Hint **{next_hint_number}** has been manually revealed in {channel.mention}. The timer has been reset.")
+		else:
+			await ctx.send(f"❌ Error: Hint channel ID {CONFIG['HINT_CHANNEL_ID']} not found. Please check configuration.")
+	else:
+		await ctx.send(f"❌ Hint **{next_hint_number}** is not configured. Please ensure you have set all {REQUIRED_HINTS} hints.")
 
 
 @bot.command(name='stop', help='[ADMIN] Forcefully ends the current game and resets ALL game settings.')
@@ -835,6 +876,41 @@ async def show_next_hint_time(ctx):
 			f"(at approximately {next_reveal.strftime('%H:%M UTC')})."
 		)
 
+@bot.command(name='mywins', help='Shows your personal win count.')
+async def show_my_wins(ctx):
+	"""Shows the calling user's personal win count."""
+	global user_wins
+	
+	wins = user_wins.get(ctx.author.id, 0)
+	
+	# Determine the current rank role achieved
+	WINNER_ROLES_CONFIG = CONFIG['WINNER_ROLES_CONFIG']
+	achieved_role_name = "None"
+	
+	sorted_wins_levels = sorted(WINNER_ROLES_CONFIG.keys(), reverse=True)
+	
+	for level in sorted_wins_levels:
+		if wins >= level:
+			# Get the actual discord role object for the name
+			role_id = WINNER_ROLES_CONFIG[level]
+			role = ctx.guild.get_role(role_id)
+			if role:
+				achieved_role_name = role.name
+			else:
+				achieved_role_name = f"Role Not Found (ID: {role_id})"
+			break
+
+	embed = discord.Embed(
+		title=f"🥇 {ctx.author.display_name}'s Win Count",
+		description=f"You have won the item guessing game **{wins}** time(s)!",
+		color=discord.Color.gold()
+	)
+	
+	embed.add_field(name="Current Rank Role", value=f"**{achieved_role_name}**", inline=False)
+
+	await ctx.send(embed=embed)
+
+
 @bot.command(name='wins', aliases=['lbc', 'top'], help='Displays the top 10 winners.')
 async def show_leaderboard(ctx):
 	"""Displays the top 10 users based on their recorded wins."""
@@ -872,30 +948,41 @@ async def show_leaderboard(ctx):
 			except Exception:
 				name = f"Unknown User ({user_id})"
 				
-		leaderboard_entries.append(f"{rank}. **{name}**: {wins} wins")
+		leaderboard_entries.append(f"**#{rank}** - **{name}**: {wins} wins")
 		
 	# 3. Create the Embed
 	embed = discord.Embed(
 		title="🏆 Item Guessing Leaderboard - Top 10",
-		description="\n".join(leaderboard_entries),
-		color=discord.Color.gold()
+		description="The server's best item guessers!",
+		color=discord.Color.orange()
 	)
-	embed.set_footer(text="Keep guessing to climb the ranks!")
+	
+	embed.add_field(name="Ranks", value='\n'.join(leaderboard_entries), inline=False)
+	embed.set_footer(text="Use !mywins to check your personal count!")
 	
 	await ctx.send(embed=embed)
 
+# --- STARTUP LOGIC ---
 
-# --- Bot Initialization ---
+# Start the Flask server in a separate thread for keep-alive functionality
+flask_thread = threading.Thread(target=run_flask_app, daemon=True)
+flask_thread.start()
 
-if __name__ == '__main__':
-	# Start the Flask web server in a separate thread
-	t = threading.Thread(target=run_flask_app)
-	t.start()
-	
-	# Start the Discord bot
-	DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-	if not DISCORD_TOKEN:
-		print("ERROR: DISCORD_TOKEN environment variable not set.")
-		sys.exit(1)
-		
-	bot.run(DISCORD_TOKEN)
+# Get the bot token from environment variables
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+
+# Check if the token is available
+if not DISCORD_TOKEN:
+    print("FATAL ERROR: DISCORD_TOKEN environment variable is not set.", file=sys.stderr)
+    sys.exit(1)
+
+# Run the bot
+try:
+    bot.run(DISCORD_TOKEN)
+except discord.HTTPException as e:
+    if e.status == 429:
+        print("Rate Limit error. The bot is sending too many requests. Please check logs.")
+    else:
+        print(f"An unexpected Discord HTTP error occurred: {e}", file=sys.stderr)
+except Exception as e:
+    print(f"An error occurred during bot execution: {e}", file=sys.stderr)
