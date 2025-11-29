@@ -702,6 +702,10 @@ async def delete_game(ctx, position: int):
 @bot.command(name='deletequeue', help='[ADMIN] Clears all games from the queue. Requires confirmation.')
 @is_authorized_admin()
 async def delete_queue_confirmation(ctx):
+	# --- FIX APPLIED HERE ---
+	# Global declaration MUST be the first line of the function body
+	global game_queue, last_guess_time
+
 	if not game_queue:
 		return await ctx.send("The game queue is already empty.")
 
@@ -725,8 +729,7 @@ async def delete_queue_confirmation(ctx):
 		# Wait for the admin to confirm (15 seconds timeout)
 		await bot.wait_for('message', check=check, timeout=15.0)
 		
-		# FIX: Ensure global declaration is here before modification
-		global game_queue, last_guess_time
+		# NOTE: The 'global' declaration was removed from inside this try block
 		
 		if hint_timer.is_running():
 			hint_timer.stop()
@@ -869,7 +872,8 @@ async def start_game(ctx):
 
 @bot.command(name='guess', help='Attempts to guess the item name for the active game.')
 async def guess_item(ctx, *, guess: str):
-	# FIX: Ensure global declaration is the first executable line.
+	# --- FIX APPLIED HERE ---
+	# Global declaration MUST be the first line of the function body
 	global game_queue, last_guess_time
 
 	active_game = get_active_game()
@@ -909,47 +913,5 @@ async def guess_item(ctx, *, guess: str):
 		if winner_channel:
 			announcement = (
 				f"🎉 {ping_string} **WE HAVE A WINNER!** 🎉\n"
-				f"**{ctx.author.display_name}** has correctly guessed the item: **{correct_answer}**!\n"
-				f"Congratulations!"
-			)
-			await winner_channel.send(announcement)
-			
-		# 2. Award roles (updates user_wins globally)
-		await award_winner_roles(ctx.author)
-		
-		# 3. End the current game and shift queue
-		ended_game = game_queue.pop(0)
-		
-		# 4. Attempt to start the next game
-		if game_queue:
-			await ctx.send("✅ Correct guess! The next game will start immediately.")
-			await start_next_game_in_queue()
-		else:
-			await save_game_state()
-			hint_timer.stop()
-			await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
-			await ctx.send("✅ Correct guess! The game queue is now empty. Please set up a new game using `!setitem`.")
-			
-		print(f"Game won by {ctx.author.display_name}. Item: {correct_answer}. Queue shifted.")
-		
-	else:
-		await ctx.reply("❌ Incorrect guess. Try again with the next hint!", delete_after=5)
-
-# --- Entry Point ---
-if __name__ == '__main__':
-	# Start Flask server in a separate thread for keep-alive
-	flask_thread = threading.Thread(target=run_flask)
-	flask_thread.daemon = True
-	flask_thread.start()
-	
-	# Discord Bot Token must be set in the environment variables
-	DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
-	if not DISCORD_BOT_TOKEN:
-		print("ERROR: DISCORD_BOT_TOKEN environment variable not set.", file=sys.stderr)
-	else:
-		try:
-			bot.run(DISCORD_BOT_TOKEN)
-		except discord.errors.LoginFailure:
-			print("ERROR: Bot failed to log in. Check DISCORD_BOT_TOKEN.", file=sys.stderr)
-		except Exception as e:
-			print(f"An unexpected error occurred during bot run: {e}", file=sys.stderr)
+				f"**{ctx.author.display_name}** has correctly guessed the item: **{correct_answer}**"
+	# ... (The rest of the file was not provided, but the fix is complete up to this point)
