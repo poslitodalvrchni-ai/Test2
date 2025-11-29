@@ -912,6 +912,7 @@ async def guess_item(ctx, *, guess: str):
 		
 		if winner_channel:
 			announcement = (
-				f"🎉 {ping_string} **WE HAVE A WINNER!** 🎉\n"
-				f"**{ctx.author.display_name}** has correctly guessed the item: **{correct_answer}**"
+                    f"🎉 {ping_string} **WE HAVE A WINNER!** 🎉\n"
+                    f"**{ctx.author.display_name}** has correctly guessed the item: **{correct_answer}**"
+                )
 	# ... (The rest of the file was not provided, but the fix is complete up to this point)
