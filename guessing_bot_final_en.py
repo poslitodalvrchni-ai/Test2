@@ -702,6 +702,9 @@ async def delete_game(ctx, position: int):
 @bot.command(name='deletequeue', help='[ADMIN] Clears all games from the queue. Requires confirmation.')
 @is_authorized_admin()
 async def delete_queue_confirmation(ctx):
+	# FIX: Move global declaration to the start of the function
+	global game_queue, last_guess_time
+
 	if not game_queue:
 		return await ctx.send("The game queue is already empty.")
 
@@ -725,7 +728,7 @@ async def delete_queue_confirmation(ctx):
 		# Wait for the admin to confirm (15 seconds timeout)
 		await bot.wait_for('message', check=check, timeout=15.0)
 		
-		global game_queue, last_guess_time
+		# global game_queue, last_guess_time # Original location was here (causing error)
 		
 		if hint_timer.is_running():
 			hint_timer.stop()
@@ -903,119 +906,4 @@ async def guess_item(ctx, *, guess: str):
 		# 1. Announce in the current channel
 		await ctx.send(f"🎉 **Congratulations, {ctx.author.display_name}!** You guessed the item: **{correct_answer}**! The game is over!")
 
-		# 2. Announce in the dedicated winner channel
-		announcement_channel = bot.get_channel(CONFIG['WINNER_ANNOUNCEMENT_CHANNEL_ID'])
-		if announcement_channel:
-			winner_ping = ctx.author.mention
-			message = f"🏆 **ROUND WINNER!** {winner_ping} just guessed the item. The correct answer was: **{correct_answer}**!"
-			await announcement_channel.send(message)
-		
-		await award_winner_roles(ctx.author)
-
-		# 3. Game Transition Logic
-		
-		# Remove the finished game (Game 1)
-		game_queue.pop(0) 
-		
-		# Ping the game end role (for admins to set up the next game)
-		game_end_ping_string = generate_game_end_ping_string()
-		await ctx.send(f"{game_end_ping_string} ✅ Game ended! The queue has been shifted.")
-
-		# Attempt to start the next game automatically
-		if game_queue:
-			await ctx.send("🚀 **Queue shifted.** Attempting to auto-start the next game...")
-			success = await start_next_game_in_queue(ctx)
-			if not success:
-				await bot.change_presence(activity=discord.Game(name=f"Game 1 setup needed (!setitem 1)"))
-		else:
-			# If queue is empty, save and update status
-			await save_game_state()
-			await bot.change_presence(activity=discord.Game(name=f"Setting up the game (!setitem)"))
-			await ctx.send("The game queue is now empty. Please set up a new game.")
-
-
-	else:
-		# Wrong Guess
-		cooldown_display = format_time_remaining(CONFIG['GUESS_COOLDOWN_MINUTES'] * 60)
-		await ctx.send(f"❌ Wrong! **{ctx.author.display_name}**, that's not it. You can guess again in {cooldown_display}.")
-
-
-@bot.command(name='current', help='Displays the hints revealed so far for the active game (Game 1).')
-async def show_current_hints(ctx):
-	active_game = get_active_game()
-	
-	if not active_game:
-		return await ctx.send("No game is currently active. Start one with `!start`.")
-	
-	current_hints_revealed = active_game.get('hints_revealed', [])
-	if not current_hints_revealed:
-		return await ctx.send("The game has started, but no hints have been revealed yet.")
-
-	REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
-	
-	embed = discord.Embed(
-		title=f"🔎 Current Game Hints (Game 1 - {len(current_hints_revealed)}/{REQUIRED_HINTS})",
-		color=discord.Color.teal()
-	)
-	
-	for hint in current_hints_revealed:
-		embed.add_field(name=f"Hint {hint['hint_number']}", value=f"_{hint['text']}_", inline=False)
-
-	await ctx.send(embed=embed)
-
-
-@bot.command(name='nexthint', help='Shows the time remaining until the next hint is revealed for the active game.')
-async def show_next_hint_time(ctx):
-	active_game = get_active_game()
-	
-	if not active_game:
-		return await ctx.send("The guessing game is currently inactive. Use `!start` to begin a new round.")
-
-	REQUIRED_HINTS = CONFIG['REQUIRED_HINTS']
-	current_hints_revealed = active_game.get('hints_revealed', [])
-	
-	if len(current_hints_revealed) == REQUIRED_HINTS:
-		return await ctx.send("All hints have already been revealed for the current item! Time to guess!")
-	
-	last_hint_reveal_time_iso = active_game.get('last_hint_reveal_time_iso')
-	if not last_hint_reveal_time_iso:
-		return await ctx.send("Game is active, but the hint timer hasn't officially started.")
-
-	last_hint_reveal_time = datetime.fromisoformat(last_hint_reveal_time_iso)
-	hint_timing_minutes = active_game['hint_timing_minutes']
-
-	# Calculate the next reveal time
-	next_reveal = last_hint_reveal_time + timedelta(minutes=hint_timing_minutes)
-	time_until_next = next_reveal - datetime.now()
-	seconds = int(time_until_next.total_seconds())
-	
-	if seconds <= 0:
-		await ctx.send("⏳ The next hint is due now and will be revealed momentarily.")
-	else:
-		time_remaining_str = format_time_remaining(seconds)
-		next_hint_number = len(current_hints_revealed) + 1
-		
-		await ctx.send(
-			f"⏱️ **Next Hint ({next_hint_number}/{REQUIRED_HINTS})** will be revealed in **{time_remaining_str}**."
-		)
-
-# --- Main Execution ---
-
-if __name__ == '__main__':
-	t = threading.Thread(target=run_flask)
-	t.daemon = True 
-	t.start()
-	
-	DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-	if not DISCORD_TOKEN:
-		print("FATAL: DISCORD_TOKEN environment variable not set.")
-		sys.exit(1)
-		
-	try:
-		bot.run(DISCORD_TOKEN)
-	except discord.errors.LoginFailure:
-		print("FATAL: Discord login failed. Check your DISCORD_TOKEN.")
-	except KeyboardInterrupt:
-		print("Bot shutting down...")
-	except Exception as e:
-		print(f"An unexpected error occurred: {e}", file=sys.stderr)
+		# 2. Announce in the dedica
