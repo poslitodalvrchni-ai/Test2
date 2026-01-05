@@ -688,11 +688,11 @@ async def help(ctx):
     """
     
     staff_cmds = """
-    `!setitem <id> <name>`
-    `!sethint <id> <#> <text>`
-    `!setallhints <id> <text>`
-    `!start <id>`
-    `!stop`, `!stop <id>`
+    `!setitem <game-number> <name>`
+    `!sethint <game-number> <#> <text>`
+    `!setallhints <game-number> <text>`
+    `!start <game-number>`
+    `!stop`, `!stop <game-number>`
     `!stopall`
     `!revealhint`
     `!queue`
