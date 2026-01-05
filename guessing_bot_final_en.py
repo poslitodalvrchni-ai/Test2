@@ -8,6 +8,7 @@ import asyncio
 import sys
 from flask import Flask
 from motor.motor_asyncio import AsyncIOMotorClient
+import certifi
 import random
 
 # --- FLASK (KEEP-ALIVE) ---
