@@ -26,17 +26,15 @@ CONFIG = {
     'GUESS_COOLDOWN_MINUTES': 30,
     'DEFAULT_HINT_TIMING_MINUTES': 60,
     
-    # DATABÁZE
     'DB_NAME': 'discord_game_bot',
 
-    # KANÁLY A ROLE
-    'TARGET_CATEGORY_ID': 1441691009993146490, 
-    'WINS_CHANNEL_ID': 1441693640089927680, # Leaderboard Channel
+    # KANÁLY
+    'WINS_CHANNEL_ID': 1441693640089927680, # Leaderboard
     'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, 
     'HINT_CHANNEL_ID': 1441386236844572834, 
     'ACHIEVEMENT_CHANNEL_ID': 1457293868876955785,
 
-    'ADMIN_ROLE_IDS': [1397641683205624009, 1441386642332979200],
+    # PINGS
     'HINT_PING_ROLE_IDS': [1441388270201077882],
     'GAME_END_PING_ROLE_ID': 1441386642332979200,
 
@@ -121,7 +119,6 @@ class MyBot(commands.Bot):
         super().__init__(command_prefix='!', intents=intents, help_command=None)
 
     async def setup_hook(self):
-        # Sync slash commands
         await self.tree.sync()
         print("Slash commands synced.")
 
@@ -142,6 +139,7 @@ last_winner_time = None
 last_winner_id = None
 recent_commands = {}
 last_global_guess = {'text': '', 'time': None}
+cached_role_ids = {'admin': None, 'host': None}
 
 # --- UTILS ---
 
@@ -163,13 +161,11 @@ async def update_leaderboard_channel(guild):
     lb_ch = guild.get_channel(CONFIG['WINS_CHANNEL_ID'])
     if not lb_ch: return
 
-    # Clean old messages
     try:
         await lb_ch.purge(limit=10)
     except:
-        pass # In case of permissions issue or empty
+        pass 
 
-    # Fetch Data
     cursor = db.users.find().sort('wins', -1).limit(10)
     users = await cursor.to_list(length=10)
     
@@ -182,9 +178,33 @@ async def update_leaderboard_channel(guild):
     embed.set_footer(text="Updated automatically • Type /mywins to see yours")
     await lb_ch.send(embed=embed)
 
+async def load_roles_config():
+    doc = await db.config.find_one({'_id': 'roles'})
+    if doc:
+        cached_role_ids['admin'] = doc.get('admin_role')
+        cached_role_ids['host'] = doc.get('host_role')
+
+async def check_permissions(user: discord.Member):
+    if not cached_role_ids['admin']: await load_roles_config()
+    
+    is_admin = False
+    is_host = False
+    
+    if cached_role_ids['admin'] and user.guild.get_role(cached_role_ids['admin']) in user.roles:
+        is_admin = True
+    if user.guild_permissions.administrator:
+        is_admin = True # Fallback for server admins
+        
+    if cached_role_ids['host'] and user.guild.get_role(cached_role_ids['host']) in user.roles:
+        is_host = True
+    if is_admin: is_host = True # Admin implies Host
+    
+    return {'player': True, 'host': is_host, 'admin': is_admin}
+
 async def load_game_state_from_db():
     global is_game_active, current_game_id, correct_answer, current_hints_storage, current_hints_revealed, last_hint_reveal_time, game_queue, hint_timing_minutes, game_start_time, last_winner_id, last_winner_time
     
+    await load_roles_config()
     doc = await db.game_state.find_one({'_id': 'main_state'})
     if not doc:
         game_queue = {str(i): {'item': None, 'hints': {}} for i in range(1, 6)}
@@ -222,7 +242,6 @@ async def save_game_state_to_db():
     await db.game_state.update_one({'_id': 'main_state'}, {'$set': state}, upsert=True)
 
 # --- ACHIEVEMENT SYSTEM ---
-
 async def grant_achievement(user: discord.Member, ach_id: str):
     if ach_id not in ACHIEVEMENTS: return
     
@@ -239,7 +258,6 @@ async def grant_achievement(user: discord.Member, ach_id: str):
     ch = bot.get_channel(CONFIG['ACHIEVEMENT_CHANNEL_ID'])
     ach_data = ACHIEVEMENTS[ach_id]
     if ch:
-        # SINGLE PING IN EMBED
         embed = discord.Embed(
             title="🏆 Achievement Unlocked!",
             description=f"{user.mention} Got achievement: **{ach_data['name']}**\n{ach_data['desc']}",
@@ -260,27 +278,7 @@ async def update_stat(user_id, stat_key, increment=1, set_val=None):
     update = {'$inc': {f'stats.{stat_key}': increment}}
     if set_val is not None:
         update = {'$set': {f'stats.{stat_key}': set_val}}
-        
     await db.users.update_one({'_id': user_id}, update, upsert=True)
-
-async def check_command_spam_achievements(interaction: discord.Interaction, cmd_name):
-    uid = interaction.user.id
-    now = datetime.now()
-    if uid not in recent_commands: recent_commands[uid] = []
-    recent_commands[uid] = [x for x in recent_commands[uid] if (now - x[1]).total_seconds() < 60]
-    recent_commands[uid].append((cmd_name, now))
-    cmds = recent_commands[uid]
-    
-    if cmd_name == 'mywins':
-        mywins = [t for c, t in cmds if c == 'mywins']
-        if len(mywins) >= 3 and (mywins[-1] - mywins[-3]).total_seconds() <= 10:
-             await grant_achievement(interaction.user, 'self_check')
-
-    if cmd_name == 'ach' and len([c for c, t in cmds if c == 'ach']) >= 5:
-         await grant_achievement(interaction.user, 'checking')
-            
-    if cmd_name == 'wins': # Note: wins cmd removed, but keeping logic just in case
-        await update_stat(uid, 'socialite_count')
 
 # --- ACHIEVEMENT VIEW (BUTTONS) ---
 class AchievementView(discord.ui.View):
@@ -291,56 +289,40 @@ class AchievementView(discord.ui.View):
 
     async def update_message(self, interaction, category):
         embed = discord.Embed(title=f"🏆 Achievements • {category}", color=discord.Color.purple())
-        
         lines = []
         for aid, data in ACHIEVEMENTS.items():
             if data.get('cat') != category: continue
-            
             is_done = aid in self.user_achievements
             icon = "✅" if is_done else "🔒"
             name = data['name']
             desc = data['desc']
-            
-            # Logic for secret/hidden
             if data.get('secret', False) and not is_done:
                 name = "???"
                 desc = "???"
-            
             lines.append(f"{icon} **{name}**\n_{desc}_")
         
-        # Split if too long (basic handling)
         desc_text = "\n\n".join(lines)
         if len(desc_text) > 4000: desc_text = desc_text[:4000] + "..."
-        
         embed.description = desc_text
         embed.set_footer(text=f"Total Unlocked: {len(self.user_achievements)}/50")
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="General", style=discord.ButtonStyle.primary)
-    async def general_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.update_message(interaction, "General")
-
+    async def general_btn(self, interaction, button): await self.update_message(interaction, "General")
     @discord.ui.button(label="Skill", style=discord.ButtonStyle.success)
-    async def skill_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.update_message(interaction, "Skill")
-
+    async def skill_btn(self, interaction, button): await self.update_message(interaction, "Skill")
     @discord.ui.button(label="Grind", style=discord.ButtonStyle.danger)
-    async def grind_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.update_message(interaction, "Grind")
-
+    async def grind_btn(self, interaction, button): await self.update_message(interaction, "Grind")
     @discord.ui.button(label="Secret", style=discord.ButtonStyle.secondary)
-    async def secret_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.update_message(interaction, "Secret")
+    async def secret_btn(self, interaction, button): await self.update_message(interaction, "Secret")
 
 # --- TASKS ---
 @tasks.loop(minutes=1)
 async def hint_timer():
     global current_hints_revealed, last_hint_reveal_time
     if not is_game_active or not last_hint_reveal_time: return
-    
     now = datetime.now()
     next_reveal = last_hint_reveal_time + timedelta(minutes=hint_timing_minutes)
-    
     if now >= next_reveal:
         nxt = len(current_hints_revealed) + 1
         if nxt in current_hints_storage:
@@ -362,41 +344,87 @@ async def on_ready():
     await load_game_state_from_db()
     if is_game_active:
         if not hint_timer.is_running(): hint_timer.start()
-        await bot.change_presence(activity=discord.Game(name="Guess the item! (/guess)"))
+        await bot.change_presence(activity=discord.Game(name="Guess the item! (!guess)"))
     else:
         await bot.change_presence(activity=discord.Game(name="Waiting for setup"))
 
-# --- SLASH COMMANDS (PLAYER) ---
+# --- HELPER: HELP COMMAND ---
+@bot.tree.command(name="help", description="Show available commands")
+async def slash_help(interaction: discord.Interaction):
+    perms = await check_permissions(interaction.user)
+    embed = discord.Embed(title="📚 Command List", color=discord.Color.blue())
+    
+    # PLAYER COMMANDS (Always visible)
+    p_cmds = (
+        "**`!guess`** - Guess the item\n"
+        "**`/mywins`** - Your stats\n"
+        "**`/current`** - Shows all revealed hints\n"
+        "**`/nexthint`** - Time until next hint\n"
+        "**`/ach`** - Shows all achievements"
+    )
+    embed.add_field(name="🎮 Player Commands", value=p_cmds, inline=False)
+    
+    # HOST COMMANDS
+    if perms['host']:
+        h_cmds = (
+            "**`!setitem 1-5`** - Set secret item (Minecraft themed)\n"
+            "**`!sethint 1-5`** - Set 7 hints\n"
+            "**`!setallhints 1-5`** - Set all hints (Shift+Enter)\n"
+            "**`!sethinttiming`** - Default 60m <:closed:1455972421491228673>\n"
+            "**`!stop 1-5`** - Stop current game <:closed:1455972421491228673>\n"
+            "**`!stopall`** - Stop & delete all queues <:closed:1455972421491228673>\n"
+            "**`!start`** - Start game (after setup)\n"
+            "**`!revealhint`** - Reveals next hint manually\n"
+            "**`!queue`** - Shows queue"
+        )
+        embed.add_field(name="🛠️ Host Commands", value=h_cmds, inline=False)
+        
+    # ADMIN COMMANDS
+    if perms['admin']:
+        a_cmds = (
+            "**`/achgive @user`** - Give achievement\n"
+            "**`/achremove @user`** - Remove achievement\n"
+            "**`/reset @user`** - Reset stats\n"
+            "**`/removewin @user`** - Remove wins\n"
+            "**`/fullreset`** - WIPE DATABASE\n"
+            "**`/setrole`** - Configure Admin/Host roles"
+        )
+        embed.add_field(name="<:wadmin_IDS:1403028581889605652> Admin Commands", value=a_cmds, inline=False)
+        
+        d_cmds = (
+            "**`!status`** - Current status\n"
+            "**`!testping`** - Test bot latency <:closed:1455972421491228673>\n"
+            "**`!reactiontest`** - Test reactions"
+        )
+        embed.add_field(name="🪲 Dev Commands", value=d_cmds, inline=False)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# --- PLAYER COMMANDS ---
 
 @bot.tree.command(name="pray", description="Pray for good luck")
 async def slash_pray(interaction: discord.Interaction):
-    await check_command_spam_achievements(interaction, 'pray')
     await grant_achievement(interaction.user, 'good_luck')
     await update_stat(interaction.user.id, 'last_pray_time', set_val=datetime.now().timestamp())
     await interaction.response.send_message("Bruh <:emoji:1397930098916851773>")
 
-@bot.tree.command(name="guess", description="Make a guess for the current item")
-async def slash_guess(interaction: discord.Interaction, guess: str):
+@bot.command(name="guess")
+async def prefix_guess(ctx, *, guess: str):
     global is_game_active, last_winner_time, last_winner_id, correct_answer, last_global_guess
     
-    # Ignore wrong channels silently in code, but for slash command we might want to be nice? 
-    # Or just let it run. But 'Wrong Place' achievement needs channel check.
-    # We'll allow it everywhere but if it's strictly wrong channel logic:
-    # if interaction.channel_id == CONFIG['WINS_CHANNEL_ID']: ... 
-    
-    uid = interaction.user.id
+    uid = ctx.author.id
     now = datetime.now()
     g_low = guess.lower().strip()
 
-    # 11. Too Late Logic
+    # 1. No Game check
     if not is_game_active:
         if last_winner_time and (now - last_winner_time).total_seconds() <= 7.5:
-            await grant_achievement(interaction.user, 'too_late')
-        await grant_achievement(interaction.user, 'ghost')
-        await interaction.response.send_message("❌ No active game.", ephemeral=True)
+            await grant_achievement(ctx.author, 'too_late')
+        await grant_achievement(ctx.author, 'ghost')
+        await ctx.message.add_reaction('❌')
         return
 
-    # Check cooldown
+    # 2. Cooldown check
     user_doc = await db.users.find_one({'_id': uid})
     last_guess = None
     if user_doc and 'last_guess_ts' in user_doc:
@@ -407,85 +435,82 @@ async def slash_guess(interaction: discord.Interaction, guess: str):
         if diff < timedelta(minutes=CONFIG['GUESS_COOLDOWN_MINUTES']):
             rem = int((timedelta(minutes=CONFIG['GUESS_COOLDOWN_MINUTES']) - diff).total_seconds())
             await update_stat(uid, 'cooldown_hits')
-            
             u_fresh = await db.users.find_one({'_id': uid})
             cd_hits = u_fresh.get('stats', {}).get('cooldown_hits', 0)
+            if cd_hits >= 3: await grant_achievement(ctx.author, 'speed_limit')
+            if cd_hits >= 5: await grant_achievement(ctx.author, 'spammer')
+            if last_global_guess['text'] == g_low: await grant_achievement(ctx.author, 'mirror')
             
-            if cd_hits >= 3: await grant_achievement(interaction.user, 'speed_limit')
-            if cd_hits >= 5: await grant_achievement(interaction.user, 'spammer')
-            if last_global_guess['text'] == g_low: await grant_achievement(interaction.user, 'mirror')
-                
-            await interaction.response.send_message(f"🛑 Cooldown! Wait **{format_time_remaining(rem)}**.", ephemeral=True)
+            # --- COOLDOWN CHANGE: CHANNEL MESSAGE WITH AUTO DELETE ---
+            await ctx.send(f"{ctx.author.mention} 🛑 Cooldown! Wait **{format_time_remaining(rem)}**.", delete_after=3)
+            await ctx.message.add_reaction('❌')
             return
 
-    # Valid guess processing
-    # Acknowledge the interaction immediately to prevent timeout, but we want to show result.
-    # We will send response at the end.
-    
+    # 3. Process Guess
     await db.users.update_one({'_id': uid}, {'$set': {'last_guess_ts': now.timestamp()}, '$inc': {'guesses': 1}}, upsert=True)
     await update_stat(uid, 'total_guesses')
     
     if uid not in session_guesses: session_guesses[uid] = []
     session_guesses[uid].append({'text': guess, 'time': now})
 
-    # Global Copycat check
+    # Global Copycat
     if last_global_guess['time'] and (now - last_global_guess['time']).total_seconds() <= 5:
-        if last_global_guess['text'] == g_low:
-             await grant_achievement(interaction.user, 'copycat')
+        if last_global_guess['text'] == g_low: await grant_achievement(ctx.author, 'copycat')
     
     last_global_guess = {'text': g_low, 'time': now}
 
-    # --- ACHIEVEMENTS CHECK ---
+    # Achievements Checks
     u = await db.users.find_one({'_id': uid})
     total = u.get('guesses', 0)
     
-    if total >= 50: await grant_achievement(interaction.user, 'persistent')
-    if total >= 100: await grant_achievement(interaction.user, 'addict')
-    if g_low in ['life', 'everything', 'word']: await grant_achievement(interaction.user, 'philosopher')
-    if g_low in ['idk', "i don't know"]: await grant_achievement(interaction.user, 'tired')
-    if g_low.isdigit(): await grant_achievement(interaction.user, 'quick_math')
-    if g_low in ['correct', 'answer']: await grant_achievement(interaction.user, 'nice_try')
-    if "bot" in g_low: await grant_achievement(interaction.user, 'bot_guess')
-    if len(guess) > 50: await grant_achievement(interaction.user, 'keyboard') # UPDATED TO 50
+    if total >= 50: await grant_achievement(ctx.author, 'persistent')
+    if total >= 100: await grant_achievement(ctx.author, 'addict')
+    if g_low in ['life', 'everything', 'word']: await grant_achievement(ctx.author, 'philosopher')
+    if g_low in ['idk', "i don't know"]: await grant_achievement(ctx.author, 'tired')
+    if g_low.isdigit(): await grant_achievement(ctx.author, 'quick_math')
+    if g_low in ['correct', 'answer']: await grant_achievement(ctx.author, 'nice_try')
+    if "bot" in g_low: await grant_achievement(ctx.author, 'bot_guess')
+    if len(guess) > 50: await grant_achievement(ctx.author, 'keyboard')
     
     same_guesses = [x['text'] for x in session_guesses[uid] if x['text'].lower() == g_low]
-    if len(same_guesses) >= 5: await grant_achievement(interaction.user, 'again')
-    if len(session_guesses[uid]) >= 20: await grant_achievement(interaction.user, 'workaholic')
+    if len(same_guesses) >= 5: await grant_achievement(ctx.author, 'again')
+    if len(session_guesses[uid]) >= 20: await grant_achievement(ctx.author, 'workaholic')
     
     unique_guesses = set(x['text'].lower() for x in session_guesses[uid])
-    if len(unique_guesses) >= 10: await grant_achievement(interaction.user, 'brute_force')
+    if len(unique_guesses) >= 10: await grant_achievement(ctx.author, 'brute_force')
 
     prev_ans = (await db.game_state.find_one({'_id': 'main_state'})).get('last_correct_answer')
-    if prev_ans and g_low == prev_ans.lower(): await grant_achievement(interaction.user, 'maybe')
+    if prev_ans and g_low == prev_ans.lower(): await grant_achievement(ctx.author, 'maybe')
 
-    # --- CHECK CORRECT ---
+    # 4. WIN / LOSS LOGIC
     if g_low == correct_answer.lower():
-        # WINNER
-        last_pray = u.get('stats', {}).get('last_pray_time', 0)
-        if (now.timestamp() - last_pray) < 60: await grant_achievement(interaction.user, 'luck_irish')
+        # --- WINNER ---
+        await ctx.message.add_reaction('✅')
         
-        if len(session_guesses[uid]) == 1: await grant_achievement(interaction.user, 'silent')
+        last_pray = u.get('stats', {}).get('last_pray_time', 0)
+        if (now.timestamp() - last_pray) < 60: await grant_achievement(ctx.author, 'luck_irish')
+        if len(session_guesses[uid]) == 1: await grant_achievement(ctx.author, 'silent')
 
         elapsed = (now - game_start_time).total_seconds()
         if len(current_hints_revealed) == 1:
-            await grant_achievement(interaction.user, 'sniper')
-            if elapsed < 60: await grant_achievement(interaction.user, 'speedrunner')
+            await grant_achievement(ctx.author, 'sniper')
+            if elapsed < 60: await grant_achievement(ctx.author, 'speedrunner')
             
-        if elapsed < 120: await grant_achievement(interaction.user, 'close_call')
-        if len(current_hints_revealed) == 7: await grant_achievement(interaction.user, 'finisher')
+        if elapsed < 120: await grant_achievement(ctx.author, 'close_call')
+        if len(current_hints_revealed) == 7: await grant_achievement(ctx.author, 'finisher')
 
         wrong_count = len([x for x in session_guesses[uid] if x['text'].lower() != g_low])
-        if wrong_count >= 5: await grant_achievement(interaction.user, 'getting_there')
-        if (now - last_hint_reveal_time).total_seconds() <= 10: await grant_achievement(interaction.user, 'sharp_eye')
+        if wrong_count >= 5: await grant_achievement(ctx.author, 'getting_there')
+        if (now - last_hint_reveal_time).total_seconds() <= 10: await grant_achievement(ctx.author, 'sharp_eye')
 
         await db.users.update_one({'_id': uid}, {'$inc': {'wins': 1}})
         new_wins = u.get('wins', 0) + 1
         
-        if new_wins == 1: await grant_achievement(interaction.user, 'first_blood')
-        if new_wins == 25: await grant_achievement(interaction.user, 'veteran')
-        if new_wins == 100: await grant_achievement(interaction.user, 'legend')
+        if new_wins == 1: await grant_achievement(ctx.author, 'first_blood')
+        if new_wins == 25: await grant_achievement(ctx.author, 'veteran')
+        if new_wins == 100: await grant_achievement(ctx.author, 'legend')
         
-        if last_winner_id == uid: await grant_achievement(interaction.user, 'double_down')
+        if last_winner_id == uid: await grant_achievement(ctx.author, 'double_down')
 
         # Roles
         try:
@@ -496,87 +521,53 @@ async def slash_guess(interaction: discord.Interaction, guess: str):
                     target_rid = rid
                     break
             if target_rid:
-                role = interaction.guild.get_role(target_rid)
-                if role and role not in interaction.user.roles:
-                    await interaction.user.add_roles(role)
+                role = ctx.guild.get_role(target_rid)
+                if role and role not in ctx.author.roles:
+                    await ctx.author.add_roles(role)
         except: pass
 
-        # Announce
-        ach_ch = bot.get_channel(CONFIG['WINNER_ANNOUNCEMENT_CHANNEL_ID'])
-        if ach_ch: await ach_ch.send(f"🏆 **WINNER!** {interaction.user.mention} guessed the item: **{correct_answer}**!")
-        
-        # Public response to command
-        await interaction.response.send_message(f"{get_ping_role_string('GAME_END_PING_ROLE_ID')} ✅ Game Over! Item found.")
-        
-        # AUTO LEADERBOARD UPDATE
-        await update_leaderboard_channel(interaction.guild)
-
-        # Save state
+        # STOP GAME FIRST
+        finished_answer = correct_answer
         finished_id = current_game_id
-        last_winner_time = now
-        last_winner_id = uid
-        await db.game_state.update_one({'_id': 'main_state'}, {'$set': {'last_correct_answer': correct_answer}})
-
         is_game_active = False
         if hint_timer.is_running(): hint_timer.stop()
+        
+        last_winner_time = now
+        last_winner_id = uid
+        await db.game_state.update_one({'_id': 'main_state'}, {'$set': {'last_correct_answer': finished_answer}})
         await save_game_state_to_db()
 
-        # Stealth Auto Start
-        next_id = finished_id + 1
-        # Need a way to run async non-blocking wait
-        async def auto_start_task():
-            if str(next_id) in game_queue and game_queue[str(next_id)]['item']:
-                await asyncio.sleep(15) 
-                # Check again
-                if str(next_id) in game_queue and game_queue[str(next_id)]['item']:
-                     # Trigger start logic (Needs context, but we can simulate or just call the logic)
-                     # Since we don't have ctx for admin command, we call logic directly or make a helper.
-                     # For simplicity, we just print here, user needs to start or we duplicate start logic.
-                     # To properly auto-start, we need the logic extracted.
-                     pass 
+        # ANNOUNCEMENTS
+        await ctx.send(f"{get_ping_role_string('GAME_END_PING_ROLE_ID')} The round has ended. The item was **{finished_answer}**.")
         
-        # NOTE: Auto-start logic requires refactoring start command to a function. 
-        # For now, adhering to user instruction "NEUPRAVUJ KOD" logic structure excessively, 
-        # but since we changed to slash, I will leave auto-start manual or require helper.
-        # Actually, let's just make it tell staff.
+        ach_ch = bot.get_channel(CONFIG['WINNER_ANNOUNCEMENT_CHANNEL_ID'])
+        if ach_ch: await ach_ch.send(f"🏆 **WINNER!** {ctx.author.mention} guessed the item: **{finished_answer}**!")
+        
+        # LEADERBOARD UPDATE
+        await update_leaderboard_channel(ctx.guild)
         
     else:
-        # WRONG GUESS - Ephemeral X
-        await interaction.response.send_message("❌", ephemeral=True)
+        # --- LOSS ---
+        await ctx.message.add_reaction('❌')
 
 @bot.tree.command(name="ach", description="Show your achievements")
 async def slash_ach(interaction: discord.Interaction):
-    await check_command_spam_achievements(interaction, 'ach')
     user_doc = await db.users.find_one({'_id': interaction.user.id})
     unlocked = user_doc.get('achievements', []) if user_doc else []
-    
     view = AchievementView(unlocked, interaction.user)
-    # Default view is General
-    await view.update_message(interaction, "General") 
-    # Note: update_message does edit_message. For initial response we need send_message.
-    # We'll fix logic:
-    
     embed = discord.Embed(title="🏆 Achievements • General", color=discord.Color.purple(), description="Loading...")
-    # Manually populate first time or call helper with a 'send' flag?
-    # Let's just respond first.
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-    # Now trigger update to fill content
     await view.update_message(interaction, "General")
-
 
 @bot.tree.command(name="mywins", description="Check your total wins")
 async def slash_mywins(interaction: discord.Interaction):
-    await check_command_spam_achievements(interaction, 'mywins')
     u = await db.users.find_one({'_id': interaction.user.id})
     c = u.get('wins', 0) if u else 0
-    
-    # Check Wealthy Achievement
     if c > 0:
         cursor = db.users.find().sort('wins', -1).limit(1)
         top_user = await cursor.to_list(length=1)
         if top_user and top_user[0]['_id'] == interaction.user.id:
             await grant_achievement(interaction.user, 'wealthy')
-
     await interaction.response.send_message(f"You have **{c}** wins.")
 
 @bot.tree.command(name="current", description="Show revealed hints")
@@ -590,12 +581,9 @@ async def slash_current(interaction: discord.Interaction):
 
 @bot.tree.command(name="nexthint", description="Time until next hint")
 async def slash_nexthint(interaction: discord.Interaction):
-    await check_command_spam_achievements(interaction, 'nexthint')
     if len(current_hints_revealed) >= CONFIG['REQUIRED_HINTS']:
         await grant_achievement(interaction.user, 'hello')
         return await interaction.response.send_message("All hints revealed.", ephemeral=True)
-        
-    await update_stat(interaction.user.id, 'nexthint_spam')
     if is_game_active and last_hint_reveal_time:
         nxt = last_hint_reveal_time + timedelta(minutes=hint_timing_minutes)
         rem = int((nxt - datetime.now()).total_seconds())
@@ -603,32 +591,94 @@ async def slash_nexthint(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("Timer not active.", ephemeral=True)
 
-# --- ADMIN COMMANDS (Still Prefix for ease, or could be slash) ---
-# Keeping them as prefix commands per standard bot structure unless requested otherwise, 
-# but user said "místo prefixu lomeno". Let's assume ONLY player commands were meant.
-# If Admin commands need to be slash, they can be converted, but text is faster for admins.
+# --- ADMIN / STAFF COMMANDS (SLASH & PREFIX) ---
+
+# Configure Roles (Admin only)
+@bot.tree.command(name="setrole", description="Set Admin or Host role")
+@app_commands.choices(type=[
+    app_commands.Choice(name="Admin", value="admin"),
+    app_commands.Choice(name="Host", value="host")
+])
+async def slash_setrole(interaction: discord.Interaction, type: app_commands.Choice[str], role: discord.Role):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("❌ Admin permissions required.", ephemeral=True)
+    
+    key = "admin_role" if type.value == "admin" else "host_role"
+    await db.config.update_one({'_id': 'roles'}, {'$set': {key: role.id}}, upsert=True)
+    cached_role_ids[type.value] = role.id
+    await interaction.response.send_message(f"✅ Set **{type.name}** role to {role.mention}")
+
+# Staff Management
+@bot.tree.command(name="achgive", description="Give achievement to user")
+async def slash_achgive(interaction: discord.Interaction, member: discord.Member, achievement_id: str):
+    perms = await check_permissions(interaction.user)
+    if not perms['admin']: return await interaction.response.send_message("❌ Admin required.", ephemeral=True)
+    
+    if achievement_id not in ACHIEVEMENTS: return await interaction.response.send_message("❌ Invalid ID.", ephemeral=True)
+    await grant_achievement(member, achievement_id)
+    await interaction.response.send_message(f"✅ Given {achievement_id} to {member.mention}")
+
+@bot.tree.command(name="achremove", description="Remove achievement from user")
+async def slash_achremove(interaction: discord.Interaction, member: discord.Member, achievement_id: str):
+    perms = await check_permissions(interaction.user)
+    if not perms['admin']: return await interaction.response.send_message("❌ Admin required.", ephemeral=True)
+    
+    await db.users.update_one({'_id': member.id}, {'$pull': {'achievements': achievement_id}})
+    await interaction.response.send_message(f"✅ Removed {achievement_id} from {member.mention}")
+
+@bot.tree.command(name="reset", description="Reset user stats")
+async def slash_reset(interaction: discord.Interaction, member: discord.Member):
+    perms = await check_permissions(interaction.user)
+    if not perms['admin']: return await interaction.response.send_message("❌ Admin required.", ephemeral=True)
+    
+    await db.users.update_one({'_id': member.id}, {'$set': {'wins': 0, 'guesses': 0, 'stats': {}}})
+    await interaction.response.send_message(f"✅ Reset stats for {member.mention}")
+
+@bot.tree.command(name="removewin", description="Remove specific amount of wins")
+async def slash_removewin(interaction: discord.Interaction, member: discord.Member, amount: int):
+    perms = await check_permissions(interaction.user)
+    if not perms['admin']: return await interaction.response.send_message("❌ Admin required.", ephemeral=True)
+    
+    await db.users.update_one({'_id': member.id}, {'$inc': {'wins': -amount}})
+    await interaction.response.send_message(f"✅ Removed {amount} wins from {member.mention}")
+
+@bot.tree.command(name="fullreset", description="WIPE ALL DATA")
+async def slash_fullreset(interaction: discord.Interaction):
+    perms = await check_permissions(interaction.user)
+    if not perms['admin']: return await interaction.response.send_message("❌ Admin required.", ephemeral=True)
+    
+    await db.users.drop()
+    await db.game_state.drop()
+    global is_game_active
+    is_game_active = False
+    await interaction.response.send_message("🔥 FULL RESET COMPLETE.")
+
+# --- HOST COMMANDS (PREFIX) ---
+async def check_host_ctx(ctx):
+    p = await check_permissions(ctx.author)
+    if not p['host']:
+        await ctx.send("❌ Host permissions required.")
+        return False
+    return True
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def start(ctx, game_id: int):
+    if not await check_host_ctx(ctx): return
     global is_game_active, current_game_id, correct_answer, current_hints_storage, current_hints_revealed, last_hint_reveal_time, game_start_time, session_guesses
     
-    if is_game_active: return await ctx.send("❌ Game active. Use `!stop` first.")
+    if is_game_active: return await ctx.send("❌ Game active.")
     s_id = str(game_id)
     if s_id not in game_queue or not game_queue[s_id]['item']: return await ctx.send("❌ Slot empty.")
-
+    
     data = game_queue[s_id]
+    if len(data.get('hints', {})) != CONFIG['REQUIRED_HINTS']: return await ctx.send("❌ Missing hints.")
+
     correct_answer = data['item']
     current_hints_storage = {int(k): v for k,v in data['hints'].items()}
-    
-    if len(current_hints_storage) != CONFIG['REQUIRED_HINTS']:
-        return await ctx.send("❌ Missing hints.")
-
     is_game_active = True
     current_game_id = game_id
     current_hints_revealed = []
-    session_guesses = {} 
-    
+    session_guesses = {}
     game_start_time = datetime.now()
     last_hint_reveal_time = game_start_time
     
@@ -644,50 +694,41 @@ async def start(ctx, game_id: int):
         await save_game_state_to_db()
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def stop(ctx, game_id: int = None):
+    if not await check_host_ctx(ctx): return
     global is_game_active, correct_answer, current_game_id, game_queue
-    
-    if game_id is None: # Force stop current
+    if game_id is None:
         if is_game_active:
             is_game_active = False
-            correct_answer = None
-            if hint_timer.is_running(): hint_timer.stop()
-            await ctx.send(f"🛑 Stopped active game.")
+            hint_timer.stop()
+            await ctx.send("🛑 Stopped active game.")
             await save_game_state_to_db()
-        else:
-            await ctx.send("No active game.")
-    else: # Clear slot
-        s_id = str(game_id)
-        if is_game_active and current_game_id == game_id:
-            is_game_active = False
-            if hint_timer.is_running(): hint_timer.stop()
-        
-        game_queue[s_id] = {'item': None, 'hints': {}}
+    else:
+        game_queue[str(game_id)] = {'item': None, 'hints': {}}
         await ctx.send(f"🗑️ Cleared slot #{game_id}")
         await save_game_state_to_db()
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def stopall(ctx):
+    if not await check_host_ctx(ctx): return
     global is_game_active, game_queue
     is_game_active = False
-    if hint_timer.is_running(): hint_timer.stop()
+    hint_timer.stop()
     game_queue = {str(i): {'item': None, 'hints': {}} for i in range(1, 6)}
     await save_game_state_to_db()
     await ctx.send("🚨 All stopped and cleared.")
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def setitem(ctx, gid: int, *, item: str):
+    if not await check_host_ctx(ctx): return
     if 1<=gid<=5:
         game_queue[str(gid)]['item'] = item.strip()
         await save_game_state_to_db()
         await ctx.send(f"✅ Slot {gid} item: {item}")
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def sethint(ctx, gid: int, num: int, *, text: str):
+    if not await check_host_ctx(ctx): return
     if 1<=gid<=5 and 1<=num<=7:
         if 'hints' not in game_queue[str(gid)]: game_queue[str(gid)]['hints'] = {}
         game_queue[str(gid)]['hints'][str(num)] = text.strip()
@@ -695,67 +736,70 @@ async def sethint(ctx, gid: int, num: int, *, text: str):
         await ctx.send(f"✅ Slot {gid} Hint {num} set.")
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def setallhints(ctx, gid: int, *, text: str):
+    if not await check_host_ctx(ctx): return
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     if len(lines) == 7:
         game_queue[str(gid)]['hints'] = {str(i+1): l for i,l in enumerate(lines)}
         await save_game_state_to_db()
         await ctx.send(f"✅ Slot {gid} hints set.")
-    else:
-        await ctx.send("❌ Need 7 lines.")
+    else: await ctx.send("❌ Need 7 lines.")
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def sethinttiming(ctx, minutes: int):
+    if not await check_host_ctx(ctx): return
     global hint_timing_minutes
-    if 1 <= minutes <= 60:
-        hint_timing_minutes = minutes
-        await save_game_state_to_db()
-        await ctx.send(f"✅ Timing set to {minutes}m.")
-    else:
-        await ctx.send("❌ 1-60 mins only.")
+    hint_timing_minutes = minutes
+    await save_game_state_to_db()
+    await ctx.send(f"✅ Timing set to {minutes}m.")
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def revealhint(ctx):
+    if not await check_host_ctx(ctx): return
     global current_hints_revealed, last_hint_reveal_time
-    if not is_game_active: return await ctx.send("No game active.")
-    
+    if not is_game_active: return await ctx.send("No game.")
     nxt = len(current_hints_revealed) + 1
     if nxt <= CONFIG['REQUIRED_HINTS']:
          txt = current_hints_storage[nxt]
          ch = bot.get_channel(CONFIG['HINT_CHANNEL_ID'])
-         if ch:
-             await ch.send(f"{get_ping_role_string('HINT_PING_ROLE_IDS')}Manual Hint {nxt}: {txt}")
+         if ch: await ch.send(f"{get_ping_role_string('HINT_PING_ROLE_IDS')}Manual Hint {nxt}: {txt}")
          current_hints_revealed.append({'hint_number': nxt, 'text': txt})
          last_hint_reveal_time = datetime.now()
          await save_game_state_to_db()
          await ctx.send(f"✅ Hint {nxt} revealed.")
-    else:
-        await ctx.send("All revealed.")
+    else: await ctx.send("All revealed.")
 
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def queue(ctx):
+    if not await check_host_ctx(ctx): return
     embed = discord.Embed(title="Game Queue", color=discord.Color.gold())
     for i in range(1, 6):
         sid = str(i)
         data = game_queue.get(sid, {})
         item = data.get('item', '❌ Empty')
         h_count = len(data.get('hints', {}))
-        status = "Waiting"
-        if is_game_active and current_game_id == i: status = "**ACTIVE**"
+        status = "**ACTIVE**" if is_game_active and current_game_id == i else "Waiting"
         embed.add_field(name=f"Slot #{i} ({status})", value=f"Item: {item}\nHints: {h_count}/7", inline=False)
     await ctx.send(embed=embed)
 
+# --- DEV COMMANDS ---
 @bot.command()
-@commands.has_any_role(*CONFIG['ADMIN_ROLE_IDS'])
 async def status(ctx):
+    if not (await check_permissions(ctx.author))['admin']: return
     if is_game_active:
-        await ctx.send(f"🟢 Active Game #{current_game_id}. Hints: {len(current_hints_revealed)}/7. Next in: {hint_timing_minutes}m.")
-    else:
-        await ctx.send("🔴 No game active.")
+        await ctx.send(f"🟢 Active Game #{current_game_id}. Hints: {len(current_hints_revealed)}/7.")
+    else: await ctx.send("🔴 No game active.")
+
+@bot.command()
+async def testping(ctx):
+    if not (await check_permissions(ctx.author))['admin']: return
+    await ctx.send(f"Pong! {round(bot.latency * 1000)}ms")
+
+@bot.command()
+async def reactiontest(ctx):
+    if not (await check_permissions(ctx.author))['admin']: return
+    await ctx.message.add_reaction('✅')
+    await ctx.message.add_reaction('❌')
 
 # --- STARTUP ---
 def run_flask():
