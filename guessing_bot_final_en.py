@@ -33,7 +33,7 @@ CONFIG = {
     'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, 
     'HINT_CHANNEL_ID': 1441386236844572834, 
     'ACHIEVEMENT_CHANNEL_ID': 1457293868876955785,
-    'STAFF_HELP_CHANNEL_ID': 1441894319744352388, # Nový staff kanál
+    'STAFF_HELP_CHANNEL_ID': 1441894319744352388, # Staff kanál
 
     # PINGS
     'HINT_PING_ROLE_IDS': [1441388270201077882],
@@ -376,7 +376,6 @@ async def slash_poststaffhelp(interaction: discord.Interaction):
     ch = interaction.guild.get_channel(CONFIG['STAFF_HELP_CHANNEL_ID'])
     if not ch: return await interaction.response.send_message("❌ Staff channel not found.", ephemeral=True)
     
-    # Generate embed with ALL permissions enabled for the staff view
     full_perms = {'player': True, 'host': True, 'admin': True}
     embed = get_help_embed(full_perms)
     
@@ -394,7 +393,7 @@ async def slash_pray(interaction: discord.Interaction):
 
 @bot.command(name="guess")
 async def prefix_guess(ctx, *, guess: str):
-    global is_game_active, last_winner_time, last_winner_id, correct_answer, last_global_guess
+    global is_game_active, last_winner_time, last_winner_id, correct_answer, last_global_guess, game_queue
     
     uid = ctx.author.id
     now = datetime.now()
@@ -410,18 +409,30 @@ async def prefix_guess(ctx, *, guess: str):
     last_guess = None
     if user_doc and 'last_guess_ts' in user_doc: last_guess = datetime.fromtimestamp(user_doc['last_guess_ts'])
 
+    # --- COOLDOWN LOGIC (FIXED) ---
     if last_guess:
         diff = now - last_guess
         if diff < timedelta(minutes=CONFIG['GUESS_COOLDOWN_MINUTES']):
             rem = int((timedelta(minutes=CONFIG['GUESS_COOLDOWN_MINUTES']) - diff).total_seconds())
+            
+            # Stats update
             await update_stat(uid, 'cooldown_hits')
             u_fresh = await db.users.find_one({'_id': uid})
             cd_hits = u_fresh.get('stats', {}).get('cooldown_hits', 0)
+            
+            # Ach checks
             if cd_hits >= 3: await grant_achievement(ctx.author, 'speed_limit')
             if cd_hits >= 5: await grant_achievement(ctx.author, 'spammer')
             if last_global_guess['text'] == g_low: await grant_achievement(ctx.author, 'mirror')
+            
+            # Send warning (auto-delete)
             await ctx.send(f"{ctx.author.mention} 🛑 Cooldown! Wait **{format_time_remaining(rem)}**.", delete_after=3)
-            await ctx.message.add_reaction('❌')
+            
+            # DELETE USER MESSAGE
+            try: await ctx.message.delete()
+            except: pass
+            
+            # STOP EXECUTION
             return
 
     await db.users.update_one({'_id': uid}, {'$set': {'last_guess_ts': now.timestamp()}, '$inc': {'guesses': 1}}, upsert=True)
@@ -493,6 +504,12 @@ async def prefix_guess(ctx, *, guess: str):
         if hint_timer.is_running(): hint_timer.stop()
         last_winner_time = now
         last_winner_id = uid
+        
+        # --- SHIFT QUEUE ---
+        for i in range(1, 5):
+            game_queue[str(i)] = game_queue[str(i+1)]
+        game_queue['5'] = {'item': None, 'hints': {}}
+        
         await db.game_state.update_one({'_id': 'main_state'}, {'$set': {'last_correct_answer': finished_answer}})
         await save_game_state_to_db()
 
