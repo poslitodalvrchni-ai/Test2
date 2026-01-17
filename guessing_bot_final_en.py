@@ -11,6 +11,7 @@ from flask import Flask
 from motor.motor_asyncio import AsyncIOMotorClient
 import certifi
 import random
+import re # PRIDANO PRO REGEX (Zavorky v nápovědách)
 
 # --- FLASK (KEEP-ALIVE) ---
 app = Flask(__name__)
@@ -330,7 +331,7 @@ def get_help_embed(perms):
         h_cmds = (
             "**`/setitem`** - Set the secret item (Minecraft themed)\n"
             "**`/sethint`** - Set specific hint number (1-7)\n"
-            "**`/setallhints`** - Set all 7 hints at once\n"
+            "**`/setallhints`** - Set all 7 hints at once (Auto-adds brackets)\n"
             f"**`/sethinttiming`** - Set minutes between hints {LOCK_EMOJI}\n"
             f"**`/stop`** - Stop current game or clear slot {LOCK_EMOJI}\n"
             f"**`/stopall`** - Stop and delete all queues {LOCK_EMOJI}\n"
@@ -702,12 +703,27 @@ async def slash_setallhints(interaction: discord.Interaction, game_id: int, text
     perms = await check_permissions(interaction.user)
     if not perms['host']: return await interaction.response.send_message("❌ Host required.", ephemeral=True)
     
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    if len(lines) == 7:
-        game_queue[str(game_id)]['hints'] = {str(i+1): l for i,l in enumerate(lines)}
+    # Split by lines and remove empty ones
+    raw_lines = [l.strip() for l in text.split('\n') if l.strip()]
+    
+    if len(raw_lines) == 7:
+        processed_hints = {}
+        for i, line in enumerate(raw_lines):
+            # 1. Remove existing numbering/brackets using Regex (e.g., "1.", "1)", "[1]")
+            # This prevents "[1] [1] Hint text"
+            clean_text = re.sub(r'^\[?\d+[\].\)]?\s*', '', line)
+            
+            # 2. Add the enforced brackets format
+            processed_hints[str(i+1)] = f"[{i+1}] {clean_text}"
+
+        game_queue[str(game_id)]['hints'] = processed_hints
         await save_game_state_to_db()
-        await interaction.response.send_message(f"✅ Slot {game_id} hints set.")
-    else: await interaction.response.send_message(f"❌ Need exactly 7 lines (Got {len(lines)}).", ephemeral=True)
+        
+        # Preview the first hint to confirm format
+        preview = processed_hints['1']
+        await interaction.response.send_message(f"✅ Slot {game_id} hints set with brackets.\nEx: `{preview}`")
+    else:
+        await interaction.response.send_message(f"❌ Need exactly 7 lines (Got {len(raw_lines)}).", ephemeral=True)
 
 @bot.tree.command(name="sethinttiming", description="Set time between hints (minutes)")
 async def slash_sethinttiming(interaction: discord.Interaction, minutes: int):
