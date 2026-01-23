@@ -11,7 +11,7 @@ from flask import Flask
 from motor.motor_asyncio import AsyncIOMotorClient
 import certifi
 import random
-import re # PRIDANO PRO REGEX (Zavorky v nápovědách)
+import re 
 
 # --- FLASK (KEEP-ALIVE) ---
 app = Flask(__name__)
@@ -30,11 +30,11 @@ CONFIG = {
     'DB_NAME': 'discord_game_bot',
 
     # KANÁLY
-    'WINS_CHANNEL_ID': 1441693640089927680, # Leaderboard
+    'WINS_CHANNEL_ID': 1441693640089927680, 
     'WINNER_ANNOUNCEMENT_CHANNEL_ID': 1441858034291708059, 
     'HINT_CHANNEL_ID': 1441386236844572834, 
     'ACHIEVEMENT_CHANNEL_ID': 1457293868876955785,
-    'STAFF_HELP_CHANNEL_ID': 1441894319744352388, # Staff kanál
+    'STAFF_HELP_CHANNEL_ID': 1441894319744352388, 
 
     # PINGS
     'HINT_PING_ROLE_IDS': [1441388270201077882],
@@ -89,7 +89,7 @@ ACHIEVEMENTS = {
     'mirror': {'name': 'Mirror 🪞', 'desc': 'Guess same word twice in a row (on cooldown).', 'cat': 'Secret', 'secret': True},
     'bot_guess': {'name': 'The Bot? 🤖', 'desc': 'Try to guess the bot name.', 'cat': 'Secret', 'secret': True},
     'wrong_place': {'name': 'Wrong Place 📍', 'desc': 'Use game command in wrong channel.', 'cat': 'Secret', 'secret': True},
-    'spammer': {'name': 'Spammer 📢', 'desc': 'Guess 5 times while on cooldown.', 'cat': 'Secret', 'secret': True},
+    'spammer': {'name': 'Spammer 📢', 'desc': 'Guess 5 times in a row while on cooldown.', 'cat': 'Secret', 'secret': True},
     'hello': {'name': 'Hello? 📞', 'desc': 'Use /nexthint when all hints are out.', 'cat': 'Secret', 'secret': True},
     'checking': {'name': 'Just checking 🔍', 'desc': 'Use /ach 5 times in a minute.', 'cat': 'Secret', 'secret': True},
     'wealthy': {'name': 'Wealthy 💰', 'desc': 'Check leaderboard while being #1.', 'cat': 'Secret', 'secret': True},
@@ -142,7 +142,9 @@ last_winner_id = None
 recent_commands = {}
 last_global_guess = {'text': '', 'time': None}
 cached_role_ids = {'admin': None, 'host': None}
-LOCK_EMOJI = "<:closed:1455972421491228673>"
+
+# OPRAVA EMOJI: Použijeme standardní Unicode zámek, aby se zobrazoval vždy
+LOCK_EMOJI = "🔒"
 
 # --- UTILS ---
 
@@ -331,7 +333,7 @@ def get_help_embed(perms):
         h_cmds = (
             "**`/setitem`** - Set the secret item (Minecraft themed)\n"
             "**`/sethint`** - Set specific hint number (1-7)\n"
-            "**`/setallhints`** - Set all 7 hints at once (Auto-adds brackets)\n"
+            "**`!setallhints`** - Set 7 hints (Prefix command: !setallhints ID Text)\n"
             f"**`/sethinttiming`** - Set minutes between hints {LOCK_EMOJI}\n"
             f"**`/stop`** - Stop current game or clear slot {LOCK_EMOJI}\n"
             f"**`/stopall`** - Stop and delete all queues {LOCK_EMOJI}\n"
@@ -410,20 +412,25 @@ async def prefix_guess(ctx, *, guess: str):
     last_guess = None
     if user_doc and 'last_guess_ts' in user_doc: last_guess = datetime.fromtimestamp(user_doc['last_guess_ts'])
 
-    # --- COOLDOWN LOGIC (FIXED) ---
+    # --- COOLDOWN LOGIC (FIXED & SPAMMER ACH UPDATED) ---
     if last_guess:
         diff = now - last_guess
         if diff < timedelta(minutes=CONFIG['GUESS_COOLDOWN_MINUTES']):
             rem = int((timedelta(minutes=CONFIG['GUESS_COOLDOWN_MINUTES']) - diff).total_seconds())
             
-            # Stats update
-            await update_stat(uid, 'cooldown_hits')
+            # Update stats
+            await update_stat(uid, 'cooldown_hits') # Total
+            await update_stat(uid, 'consecutive_cooldown_hits') # In a row
+            
             u_fresh = await db.users.find_one({'_id': uid})
-            cd_hits = u_fresh.get('stats', {}).get('cooldown_hits', 0)
+            cd_hits_total = u_fresh.get('stats', {}).get('cooldown_hits', 0)
+            cd_hits_consecutive = u_fresh.get('stats', {}).get('consecutive_cooldown_hits', 0)
             
             # Ach checks
-            if cd_hits >= 3: await grant_achievement(ctx.author, 'speed_limit')
-            if cd_hits >= 5: await grant_achievement(ctx.author, 'spammer')
+            if cd_hits_total >= 3: await grant_achievement(ctx.author, 'speed_limit')
+            # SPAMMER: Nyní kontroluje 5x V ŘADĚ (consecutive)
+            if cd_hits_consecutive >= 5: await grant_achievement(ctx.author, 'spammer')
+            
             if last_global_guess['text'] == g_low: await grant_achievement(ctx.author, 'mirror')
             
             # Send warning (auto-delete)
@@ -435,6 +442,9 @@ async def prefix_guess(ctx, *, guess: str):
             
             # STOP EXECUTION
             return
+
+    # Valid guess -> Reset consecutive cooldown counter
+    await update_stat(uid, 'consecutive_cooldown_hits', set_val=0)
 
     await db.users.update_one({'_id': uid}, {'$set': {'last_guess_ts': now.timestamp()}, '$inc': {'guesses': 1}}, upsert=True)
     await update_stat(uid, 'total_guesses')
@@ -481,7 +491,10 @@ async def prefix_guess(ctx, *, guess: str):
         if wrong_count >= 5: await grant_achievement(ctx.author, 'getting_there')
         if (now - last_hint_reveal_time).total_seconds() <= 10: await grant_achievement(ctx.author, 'sharp_eye')
 
+        # UPDATE WIN COUNT
         await db.users.update_one({'_id': uid}, {'$inc': {'wins': 1}})
+        
+        # ACH & ROLES
         new_wins = u.get('wins', 0) + 1
         if new_wins == 1: await grant_achievement(ctx.author, 'first_blood')
         if new_wins == 25: await grant_achievement(ctx.author, 'veteran')
@@ -517,6 +530,8 @@ async def prefix_guess(ctx, *, guess: str):
         await ctx.send(f"{get_ping_role_string('GAME_END_PING_ROLE_ID')} The round has ended. The item was **{finished_answer}**.")
         ach_ch = bot.get_channel(CONFIG['WINNER_ANNOUNCEMENT_CHANNEL_ID'])
         if ach_ch: await ach_ch.send(f"🏆 **WINNER!** {ctx.author.mention} guessed the item: **{finished_answer}**!")
+        
+        # UPDATE LEADERBOARD (Zde to již bylo, je to správně)
         await update_leaderboard_channel(ctx.guild)
     else:
         await ctx.message.add_reaction('❌')
@@ -608,7 +623,7 @@ async def slash_fullreset(interaction: discord.Interaction):
     is_game_active = False
     await interaction.response.send_message("🔥 FULL RESET COMPLETE.")
 
-# --- HOST COMMANDS (SLASH) ---
+# --- HOST COMMANDS (SLASH + PREFIX) ---
 
 @bot.tree.command(name="start", description="Start a game from the queue")
 async def slash_start(interaction: discord.Interaction, game_id: int):
@@ -698,32 +713,30 @@ async def slash_sethint(interaction: discord.Interaction, game_id: int, hint_num
         await interaction.response.send_message(f"✅ Slot {game_id} Hint {hint_number} set.")
     else: await interaction.response.send_message("❌ Invalid slot or hint number.", ephemeral=True)
 
-@bot.tree.command(name="setallhints", description="Set all 7 hints at once (copy paste)")
-async def slash_setallhints(interaction: discord.Interaction, game_id: int, text: str):
-    perms = await check_permissions(interaction.user)
-    if not perms['host']: return await interaction.response.send_message("❌ Host required.", ephemeral=True)
+# --- PREFIX COMMAND FOR SETALLHINTS ---
+@bot.command(name="setallhints")
+async def prefix_setallhints(ctx, game_id: int, *, text: str):
+    perms = await check_permissions(ctx.author)
+    if not perms['host']: return # Tichý fail nebo chybová zpráva
     
-    # Split by lines and remove empty ones
+    # Rozdělení řádků
     raw_lines = [l.strip() for l in text.split('\n') if l.strip()]
     
     if len(raw_lines) == 7:
         processed_hints = {}
         for i, line in enumerate(raw_lines):
-            # 1. Remove existing numbering/brackets using Regex (e.g., "1.", "1)", "[1]")
-            # This prevents "[1] [1] Hint text"
+            # Regex úprava (odstraní staré číslování)
             clean_text = re.sub(r'^\[?\d+[\].\)]?\s*', '', line)
-            
-            # 2. Add the enforced brackets format
+            # Přidá nové závorky
             processed_hints[str(i+1)] = f"[{i+1}] {clean_text}"
 
         game_queue[str(game_id)]['hints'] = processed_hints
         await save_game_state_to_db()
         
-        # Preview the first hint to confirm format
         preview = processed_hints['1']
-        await interaction.response.send_message(f"✅ Slot {game_id} hints set with brackets.\nEx: `{preview}`")
+        await ctx.send(f"✅ Slot {game_id} hints set with brackets.\nEx: `{preview}`")
     else:
-        await interaction.response.send_message(f"❌ Need exactly 7 lines (Got {len(raw_lines)}).", ephemeral=True)
+        await ctx.send(f"❌ Need exactly 7 lines (Got {len(raw_lines)}).")
 
 @bot.tree.command(name="sethinttiming", description="Set time between hints (minutes)")
 async def slash_sethinttiming(interaction: discord.Interaction, minutes: int):
